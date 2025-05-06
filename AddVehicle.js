@@ -1,47 +1,28 @@
 import React, { useState } from 'react';
 import { View, TextInput, Button, Alert, StyleSheet } from 'react-native';
 import axios from 'axios';
-import { useNavigation } from '@react-navigation/native';
 import { API_BASE } from './config';
 
-export default function AddVehicle() {
+export default function AddVehicle({ navigation }) {
   const [make, setMake] = useState('');
   const [model, setModel] = useState('');
   const [year, setYear] = useState('');
-  const nav = useNavigation();
 
   const submit = async () => {
     if (!make || !model || !year) return Alert.alert('All fields are required');
     try {
       await axios.post(`${API_BASE}/api/vehicles`, { make, model, year: Number(year) });
-      nav.goBack();
+      navigation.goBack();
     } catch (err) {
-      console.error(err);
       Alert.alert('Error adding vehicle', err.response?.data?.error || err.message);
     }
   };
 
   return (
     <View style={styles.container}>
-      <TextInput
-        placeholder="Make"
-        value={make}
-        onChangeText={setMake}
-        style={styles.input}
-      />
-      <TextInput
-        placeholder="Model"
-        value={model}
-        onChangeText={setModel}
-        style={styles.input}
-      />
-      <TextInput
-        placeholder="Year"
-        value={year}
-        onChangeText={setYear}
-        keyboardType="numeric"
-        style={styles.input}
-      />
+      <TextInput placeholder="Make" value={make} onChangeText={setMake} style={styles.input} />
+      <TextInput placeholder="Model" value={model} onChangeText={setModel} style={styles.input} />
+      <TextInput placeholder="Year" value={year} onChangeText={setYear} keyboardType="numeric" style={styles.input} />
       <Button title="Create Vehicle" onPress={submit} />
     </View>
   );
@@ -49,5 +30,5 @@ export default function AddVehicle() {
 
 const styles = StyleSheet.create({
   container: {flex:1,padding:16,justifyContent:'center'},
-  input: {borderWidth:1,borderColor:'#ccc',padding:8,marginBottom:12},
+  input: {borderWidth:1,borderColor:'#ccc',padding:8,marginBottom:12}
 });

@@ -26,9 +26,25 @@ export default function App() {
             ),
           })}
         />
-        <Stack.Screen name="Tracker" component={Tracker} />
+        <Stack.Screen
+          name="Tracker"
+          component={Tracker}
+          options={{ title: 'Tracker' }}
+        />
         <Stack.Screen name="Leaderboard" component={Leaderboard} />
-        <Stack.Screen name="Vehicles" component={VehicleList} />
+        <Stack.Screen
+          name="Vehicles"
+          component={VehicleList}
+          options={({ navigation }) => ({
+            title: 'Vehicles',
+            headerRight: () => (
+              <Button
+                title="Add"
+                onPress={() => navigation.navigate('AddVehicle')}
+              />
+            ),
+          })}
+        />
         <Stack.Screen
           name="AddVehicle"
           component={AddVehicle}

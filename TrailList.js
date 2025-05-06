@@ -7,18 +7,11 @@ export default function TrailList({ navigation }) {
   const [trails, setTrails] = useState(null);
 
   useEffect(() => {
-    console.log('Fetching', `${API_BASE}/api/trailheads`);
-    axios
-      .get(`${API_BASE}/api/trailheads`)
-      .then(r => {
-        console.log('Got trails', r.data);
-        setTrails(r.data);
-      })
-      .catch(err => {
-        console.log('AXIOS ERROR', err.toJSON());
-      });
+    axios.get(`${API_BASE}/api/trailheads`)
+      .then(res => setTrails(res.data))
+      .catch(console.error);
   }, []);
-  
+
   if (!trails) {
     return (
       <View style={styles.center}>
