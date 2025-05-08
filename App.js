@@ -1,11 +1,13 @@
-// App.js
+// ---------- App.js ----------
 import React from 'react';
+import { Button } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { MaterialIcons } from '@expo/vector-icons';
 
-import TrailList from './TrailList';
+import RunList from './RunList';
+import AddRun from './AddRun';
 import Tracker from './Tracker';
 import Leaderboard from './Leaderboard';
 import RunDetail from './RunDetail';
@@ -15,62 +17,35 @@ import AddVehicle from './AddVehicle';
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
-// Stack for route-related screens
+// Route management stack
 function RoutesStack() {
   return (
     <Stack.Navigator
-      initialRouteName="Trails"
-      screenOptions={{
-        headerTitleAlign: 'center',
-        headerStyle: { backgroundColor: '#fff' },
-        headerTitleStyle: { fontSize: 18 },
-      }}
+      initialRouteName="RunList"
+      screenOptions={{ headerTitleAlign: 'center' }}
     >
       <Stack.Screen
-        name="Trails"
-        component={TrailList}
+        name="RunList"
+        component={RunList}
         options={({ navigation }) => ({
-          title: 'Trails',
+          title: 'My Runs',
           headerRight: () => (
-            <MaterialIcons
-              name="directions-car"
-              size={24}
-              onPress={() => navigation.navigate('Vehicles')}
-              style={{ marginRight: 16 }}
-            />
+            <Button title="New Run" onPress={() => navigation.navigate('AddRun')} />
           ),
         })}
       />
-      <Stack.Screen
-        name="Tracker"
-        component={Tracker}
-        options={{ title: 'Tracker' }}
-      />
-      <Stack.Screen
-        name="Leaderboard"
-        component={Leaderboard}
-        options={{ title: 'Leaderboard' }}
-      />
-      <Stack.Screen
-        name="RunDetail"
-        component={RunDetail}
-        options={{ title: 'Run Detail' }}
-      />
+      <Stack.Screen name="AddRun" component={AddRun} options={{ title: 'New Run' }} />
+      <Stack.Screen name="Tracker" component={Tracker} options={{ title: 'Tracking' }} />
+      <Stack.Screen name="Leaderboard" component={Leaderboard} options={{ title: 'Leaderboard' }} />
+      <Stack.Screen name="RunDetail" component={RunDetail} options={{ title: 'Run Detail' }} />
     </Stack.Navigator>
   );
 }
 
-// Stack for vehicle management
+// Vehicle management stack
 function VehiclesStack() {
   return (
-    <Stack.Navigator
-      initialRouteName="VehicleList"
-      screenOptions={{
-        headerTitleAlign: 'center',
-        headerStyle: { backgroundColor: '#fff' },
-        headerTitleStyle: { fontSize: 18 },
-      }}
-    >
+    <Stack.Navigator initialRouteName="VehicleList" screenOptions={{ headerTitleAlign: 'center' }}>
       <Stack.Screen
         name="VehicleList"
         component={VehicleList}
@@ -86,39 +61,26 @@ function VehiclesStack() {
           ),
         })}
       />
-      <Stack.Screen
-        name="AddVehicle"
-        component={AddVehicle}
-        options={{ title: 'New Vehicle' }}
-      />
+      <Stack.Screen name="AddVehicle" component={AddVehicle} options={{ title: 'New Vehicle' }} />
     </Stack.Navigator>
   );
 }
 
+// Main App with bottom tabs
 export default function App() {
   return (
     <NavigationContainer>
-      <Tab.Navigator
-        initialRouteName="Routes"
-        screenOptions={({ route }) => ({
-          headerShown: false,
-          tabBarIcon: ({ color, size }) => {
-            const icons = {
-              Routes: 'map',
-              Vehicles: 'directions-car',
-            };
-            return (
-              <MaterialIcons
-                name={icons[route.name]}
-                size={size}
-                color={color}
-              />
-            );
-          },
-        })}
-      >
-        <Tab.Screen name="Routes" component={RoutesStack} />
-        <Tab.Screen name="Vehicles" component={VehiclesStack} />
+      <Tab.Navigator initialRouteName="Routes" screenOptions={{ headerShown: false }}>
+        <Tab.Screen
+          name="Routes"
+          component={RoutesStack}
+          options={{ tabBarIcon: ({ color, size }) => <MaterialIcons name="map" size={size} color={color} /> }}
+        />
+        <Tab.Screen
+          name="Vehicles"
+          component={VehiclesStack}
+          options={{ tabBarIcon: ({ color, size }) => <MaterialIcons name="directions-car" size={size} color={color} /> }}
+        />
       </Tab.Navigator>
     </NavigationContainer>
   );

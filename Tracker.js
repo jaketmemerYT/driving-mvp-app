@@ -1,136 +1,113 @@
-// Tracker.js
+// ---------- Tracker.js ----------
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
-import {
-  View,
-  Text,
-  Alert,
-  ActivityIndicator,
-  StyleSheet,
-  TouchableOpacity,
-  Button,
-} from 'react-native';
-import MapView, { Polyline, Marker } from 'react-native-maps';
+import { View, Text, Alert, ActivityIndicator, StyleSheet, TouchableOpacity, Button } from 'react-native';
+import MapView, { Polyline, Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
 import axios from 'axios';
 import { API_BASE } from './config';
 
-export default function Tracker({ route, navigation }) {
-  const { trailId, name } = route.params;
+// Haversine formula to calculate distance in meters
+function distanceMeters(a, b) {
+  const toRad = deg => (deg * Math.PI) / 180;
+  const R = 6371000;
+  const dLat = toRad(b.latitude - a.latitude);
+  const dLon = toRad(b.longitude - a.longitude);
+  const lat1 = toRad(a.latitude);
+  const lat2 = toRad(b.latitude);
+  const sinDlat = Math.sin(dLat / 2);
+  const sinDlon = Math.sin(dLon / 2);
+  const sq = sinDlat * sinDlat + sinDlon * sinDlon * Math.cos(lat1) * Math.cos(lat2);
+  return 2 * R * Math.asin(Math.sqrt(sq));
+}
 
-  // Vehicles state
+export default function Tracker({ route, navigation }) {
+  const { trailId: paramTrailId, trailName, startCoords, endCoords } = route.params;
+  const [trailId, setTrailId] = useState(paramTrailId || null);
   const [vehicles, setVehicles] = useState(null);
   const [selectedVehicleId, setSelectedVehicleId] = useState(null);
-
-  // Tracking state
   const [tracking, setTracking] = useState(false);
 
-  // coordsRef holds the authoritative list of points
-  const coordsRef = useRef([]);
-  // coords state mirrors for rendering
-  const [coords, setCoords] = useState([]);
+  const coordsRef = useRef(startCoords ? [startCoords] : []);
+  const [coords, setCoords] = useState(coordsRef.current);
+  // Initialize region with deltas if startCoords provided
+  const [region, setRegion] = useState(
+    startCoords
+      ? { ...startCoords, latitudeDelta: 0.01, longitudeDelta: 0.01 }
+      : null
+  );
 
-  // Map region
-  const [region, setRegion] = useState(null);
-
-  // Timing
   const startTime = useRef(null);
   const subscription = useRef(null);
+  const mapRef = useRef(null);(null);
 
-  // Load vehicles whenever this screen is focused
+  // Load vehicles when screen focuses
   useEffect(() => {
-    const unsubscribe = navigation.addListener('focus', () => {
-      axios
-        .get(`${API_BASE}/api/vehicles`)
-        .then(res => setVehicles(res.data))
-        .catch(() => Alert.alert('Error', 'Could not load vehicles'));
+    const unsub = navigation.addListener('focus', () => {
+      axios.get(`${API_BASE}/api/vehicles`).then(r => setVehicles(r.data));
     });
-    return unsubscribe;
+    return unsub;
   }, [navigation]);
 
-  // Start tracking
   const startTracking = async () => {
-    if (!selectedVehicleId) {
-      return Alert.alert('Select a vehicle first');
+    if (!selectedVehicleId) return Alert.alert('Select a vehicle first');
+
+    if (trailName && !trailId) {
+      const res = await axios.post(`${API_BASE}/api/trailheads`, { name: trailName });
+      setTrailId(res.data.id);
     }
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      return Alert.alert('Location permission denied');
+
+    // Ensure initial region has deltas
+    if (!region && startCoords) {
+      setRegion({ ...startCoords, latitudeDelta: 0.01, longitudeDelta: 0.01 });
     }
 
-    // Get initial location and seed coords
-    const { coords: initial } = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.High,
-    });
-    const { latitude, longitude } = initial;
-    coordsRef.current = [{ latitude, longitude }];
-    setCoords([{ latitude, longitude }]);
-
-    // Center map on initial location
-    setRegion({
-      latitude,
-      longitude,
-      latitudeDelta: 0.01,
-      longitudeDelta: 0.01,
-    });
-
-    // Start timer and tracking state
     startTime.current = Date.now();
     setTracking(true);
 
-    // Subscribe to location updates
     subscription.current = await Location.watchPositionAsync(
       { accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 1 },
       loc => {
-        const { latitude: lat, longitude: lon } = loc.coords;
-        coordsRef.current.push({ latitude: lat, longitude: lon });
+        const pt = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
+        coordsRef.current.push(pt);
         setCoords([...coordsRef.current]);
-        setRegion(r => ({ ...r, latitude: lat, longitude: lon }));
+        if (mapRef.current) {
+          mapRef.current.animateToRegion({
+            latitude: pt.latitude,
+            longitude: pt.longitude,
+            latitudeDelta: 0.01,
+            longitudeDelta: 0.01,
+          }, 500);
+        }
+        if (endCoords && distanceMeters(pt, endCoords) < 6) stopTracking();
       }
     );
   };
 
-  // Stop tracking
   const stopTracking = async () => {
     subscription.current?.remove();
     setTracking(false);
 
-    // Use authoritative coordsRef
-    let runCoords = coordsRef.current;
-
-    // Fallback if still empty
-    if (runCoords.length === 0) {
-      const { coords: fallback } = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
-      });
-      runCoords = [{ latitude: fallback.latitude, longitude: fallback.longitude }];
-    }
-
+    const runCoords = coordsRef.current;
     const duration = (Date.now() - startTime.current) / 1000;
-    const avgSpeed =
-      runCoords.reduce((sum, p) => sum + (p.speed || 0), 0) / runCoords.length || 0;
+    const avgSpeed = runCoords.reduce((sum, p) => sum + (p.speed || 0), 0) / runCoords.length || 0;
 
-    try {
-      const res = await axios.post(`${API_BASE}/api/routes`, {
-        trailId,
-        coords: runCoords,
-        duration,
-        avgSpeed,
-        vehicleId: selectedVehicleId,
-      });
-      navigation.replace('RunDetail', { run: res.data, trailName: name });
-    } catch (err) {
-      Alert.alert('Upload failed', err.response?.data?.error || err.message);
-    }
+    const res = await axios.post(`${API_BASE}/api/routes`, {
+      trailId,
+      coords: runCoords,
+      duration,
+      avgSpeed,
+      vehicleId: selectedVehicleId,
+    });
+    navigation.replace('RunDetail', { run: res.data, trailName });
 
-    // Reset coordsRef for next run
     coordsRef.current = [];
     setCoords([]);
   };
 
-  // Place Start/Stop in header
+  // Header button
   useLayoutEffect(() => {
     navigation.setOptions({
-      title: name,
+      title: trailName || 'Tracking',
       headerRight: () => (
         <Button
           title={tracking ? 'Stop' : 'Start'}
@@ -141,38 +118,27 @@ export default function Tracker({ route, navigation }) {
     });
   }, [navigation, tracking, selectedVehicleId]);
 
-  // Loading vehicles
-  if (vehicles === null) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" />
-      </View>
-    );
+  if (!vehicles) {
+    return <View style={styles.center}><ActivityIndicator size="large"/></View>;
   }
-
-  // No vehicles yet
   if (vehicles.length === 0) {
-    return (
-      <View style={styles.center}>
-        <Button
-          title="Add a Vehicle"
-          onPress={() => navigation.navigate('AddVehicle')}
-        />
-      </View>
-    );
+    return <View style={styles.center}><Button title="Add a Vehicle" onPress={() => navigation.navigate('AddVehicle')} /></View>;
   }
 
-  // Show map when tracking
-  if (tracking && region) {
+  if (tracking) {
+    if (!region) {
+      return <View style={styles.center}><ActivityIndicator size="large"/></View>;
+    }
     return (
-      <MapView style={styles.map} region={region}>
+      <MapView ref={mapRef} style={styles.map} initialRegion={region}>
         <Polyline coordinates={coords} strokeWidth={4} />
         <Marker coordinate={coords[coords.length - 1]} />
+        {endCoords && <Marker coordinate={endCoords} pinColor="green" />}
+        {endCoords && <Circle center={endCoords} radius={6} />}
       </MapView>
     );
   }
 
-  // Vehicle selector
   return (
     <View style={styles.container}>
       <Text style={styles.subheader}>Select Your Vehicle</Text>
@@ -185,9 +151,7 @@ export default function Tracker({ route, navigation }) {
           ]}
           onPress={() => setSelectedVehicleId(v.id)}
         >
-          <Text>
-            {v.make} {v.model} ({v.year})
-          </Text>
+          <Text>{v.make} {v.model} ({v.year})</Text>
         </TouchableOpacity>
       ))}
     </View>
@@ -199,15 +163,6 @@ const styles = StyleSheet.create({
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   map: { flex: 1 },
   subheader: { marginBottom: 8, fontWeight: '500' },
-  vehicleItem: {
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#ccc',
-    borderRadius: 4,
-    marginBottom: 8,
-  },
-  selectedVehicle: {
-    borderColor: '#007AFF',
-    backgroundColor: '#E6F0FF',
-  },
+  vehicleItem: { padding: 12, borderWidth: 1, borderColor: '#ccc', borderRadius: 4, marginBottom: 8 },
+  selectedVehicle: { borderColor: '#007AFF', backgroundColor: '#E6F0FF' },
 });
