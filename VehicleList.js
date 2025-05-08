@@ -1,18 +1,57 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, FlatList, ActivityIndicator, StyleSheet } from 'react-native';
+// VehicleList.js
+import React, { useEffect, useState, useCallback } from 'react';
+import {
+  View,
+  FlatList,
+  Text,
+  ActivityIndicator,
+  StyleSheet,
+  Button,
+} from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import axios from 'axios';
 import { API_BASE } from './config';
 
-export default function VehicleList() {
+export default function VehicleList({ navigation }) {
   const [vehicles, setVehicles] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
 
+  // Fetch vehicles
+  const loadVehicles = async () => {
+    setRefreshing(true);
+    try {
+      const res = await axios.get(`${API_BASE}/api/vehicles`);
+      setVehicles(res.data);
+    } catch (err) {
+      console.error('Error fetching vehicles:', err);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // Initial load
   useEffect(() => {
-    axios.get(`${API_BASE}/api/vehicles`)
-      .then(r => setVehicles(r.data))
-      .catch(console.error);
+    loadVehicles();
   }, []);
 
-  if (!vehicles) {
+  // Reload on focus
+  useFocusEffect(
+    useCallback(() => {
+      loadVehicles();
+    }, [])
+  );
+
+  // Header button
+  useEffect(() => {
+    navigation.setOptions({
+      headerTitle: 'Vehicles',
+      headerRight: () => (
+        <Button title="Add" onPress={() => navigation.navigate('AddVehicle')} />
+      ),
+    });
+  }, [navigation]);
+
+  if (vehicles === null) {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" />
@@ -23,10 +62,17 @@ export default function VehicleList() {
   return (
     <FlatList
       data={vehicles}
-      keyExtractor={v => v.id}
+      keyExtractor={(item, idx) => (item.id ? String(item.id) : String(idx))}
+      refreshing={refreshing}
+      onRefresh={loadVehicles}
+      ListEmptyComponent={() => (
+        <Text style={styles.empty}>No vehicles yet.</Text>
+      )}
       renderItem={({ item }) => (
         <View style={styles.item}>
-          <Text style={styles.title}>{item.make} {item.model} ({item.year})</Text>
+          <Text style={styles.title}>
+            {item.make} {item.model} ({item.year})
+          </Text>
         </View>
       )}
     />
@@ -34,8 +80,8 @@ export default function VehicleList() {
 }
 
 const styles = StyleSheet.create({
-  center: {flex:1,justifyContent:'center',alignItems:'center'},
-  item: {padding:16,borderBottomWidth:1,borderColor:'#eee'},
-  title: {fontSize:18}
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  empty: { textAlign: 'center', marginTop: 32, color: '#666' },
+  item: { padding: 16, borderBottomWidth: 1, borderColor: '#eee' },
+  title: { fontSize: 16 },
 });
-

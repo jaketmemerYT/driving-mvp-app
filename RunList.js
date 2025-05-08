@@ -1,5 +1,5 @@
 // RunList.js
-import React, { useEffect, useState, useLayoutEffect } from 'react';
+import React, { useEffect, useState, useLayoutEffect, useCallback } from 'react';
 import {
   View,
   FlatList,
@@ -9,44 +9,67 @@ import {
   StyleSheet,
   Button,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import axios from 'axios';
 import { API_BASE } from './config';
 
 export default function RunList({ navigation }) {
   const [runs, setRuns] = useState(null);
   const [trailsMap, setTrailsMap] = useState({});
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Fetch runs and trail names
+  // Fetch trailheads and build map
+  const loadTrails = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/api/trailheads`);
+      const map = {};
+      res.data.forEach(t => (map[t.id] = t.name));
+      setTrailsMap(map);
+    } catch (err) {
+      console.error('Error fetching trailheads:', err);
+    }
+  };
+
+  // Fetch and sort runs
+  const loadRuns = async () => {
+    setRefreshing(true);
+    try {
+      const res = await axios.get(`${API_BASE}/api/routes`);
+      const sorted = res.data.sort((a, b) => b.timestamp - a.timestamp);
+      setRuns(sorted);
+    } catch (err) {
+      console.error('Error fetching runs:', err);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // Initial load on mount
   useEffect(() => {
-    axios
-      .get(`${API_BASE}/api/routes`)
-      .then(res => setRuns(res.data))
-      .catch(err => console.error('Error fetching runs:', err));
-
-    axios
-      .get(`${API_BASE}/api/trailheads`)
-      .then(res => {
-        const map = {};
-        res.data.forEach(t => { map[t.id] = t.name; });
-        setTrailsMap(map);
-      })
-      .catch(err => console.error('Error fetching trailheads:', err));
+    loadTrails();
+    loadRuns();
   }, []);
 
-  // Add "New Run" button to header
+  // Also reload both when screen gains focus
+  useFocusEffect(
+    useCallback(() => {
+      loadTrails();
+      loadRuns();
+    }, [])
+  );
+
+  // Inject header button
   useLayoutEffect(() => {
     navigation.setOptions({
       headerTitle: 'My Runs',
       headerRight: () => (
-        <Button
-          title="New Run"
-          onPress={() => navigation.navigate('AddRun')}
-        />
+        <Button title="New Run" onPress={() => navigation.navigate('AddRun')} />
       ),
     });
   }, [navigation]);
 
-  if (!runs) {
+  // Show spinner until we have run data
+  if (runs === null) {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" />
@@ -57,12 +80,13 @@ export default function RunList({ navigation }) {
   return (
     <FlatList
       data={runs}
-      keyExtractor={(item, index) =>
-        item.id ? String(item.id) : String(index)
-      }
-      ListEmptyComponent={() => (
-        <Text style={styles.centerText}>No runs yet.</Text>
-      )}
+      keyExtractor={(item, idx) => (item.id ? String(item.id) : String(idx))}
+      refreshing={refreshing}
+      onRefresh={() => {
+        loadTrails();
+        loadRuns();
+      }}
+      ListEmptyComponent={() => <Text style={styles.empty}>No runs yet.</Text>}
       renderItem={({ item }) => (
         <TouchableOpacity
           style={styles.item}
@@ -77,7 +101,8 @@ export default function RunList({ navigation }) {
             {trailsMap[item.trailId] || 'Trail'}
           </Text>
           <Text style={styles.subtitle}>
-            {new Date(item.timestamp).toLocaleString()} • {Math.round(item.duration)}s
+            {new Date(item.timestamp).toLocaleString()} •{' '}
+            {Math.round(item.duration)}s
           </Text>
         </TouchableOpacity>
       )}
@@ -87,7 +112,7 @@ export default function RunList({ navigation }) {
 
 const styles = StyleSheet.create({
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  centerText: { textAlign: 'center', marginTop: 32, color: '#666' },
+  empty: { textAlign: 'center', marginTop: 32, color: '#666' },
   item: { padding: 16, borderBottomWidth: 1, borderColor: '#eee' },
   title: { fontSize: 16, fontWeight: 'bold' },
   subtitle: { color: '#666', marginTop: 4 },
