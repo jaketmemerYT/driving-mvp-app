@@ -1,56 +1,138 @@
-import React, { useState, useRef, useLayoutEffect, useEffect } from 'react';
-import { View, Text, Alert, FlatList, TouchableOpacity, ActivityIndicator, StyleSheet } from 'react-native';
-import { Button } from 'react-native';
-import axios from 'axios';
+// Tracker.js
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
+import {
+  View,
+  Text,
+  Alert,
+  ActivityIndicator,
+  StyleSheet,
+  TouchableOpacity,
+  Button,
+} from 'react-native';
+import MapView, { Polyline, Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
+import axios from 'axios';
 import { API_BASE } from './config';
 
 export default function Tracker({ route, navigation }) {
   const { trailId, name } = route.params;
+
+  // Vehicles state
   const [vehicles, setVehicles] = useState(null);
   const [selectedVehicleId, setSelectedVehicleId] = useState(null);
+
+  // Tracking state
   const [tracking, setTracking] = useState(false);
+
+  // coordsRef holds the authoritative list of points
+  const coordsRef = useRef([]);
+  // coords state mirrors for rendering
   const [coords, setCoords] = useState([]);
+
+  // Map region
+  const [region, setRegion] = useState(null);
+
+  // Timing
   const startTime = useRef(null);
   const subscription = useRef(null);
 
-  // Load vehicles on focus
+  // Load vehicles whenever this screen is focused
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', () => {
-      axios.get(`${API_BASE}/api/vehicles`)
-        .then(r => setVehicles(r.data))
+      axios
+        .get(`${API_BASE}/api/vehicles`)
+        .then(res => setVehicles(res.data))
         .catch(() => Alert.alert('Error', 'Could not load vehicles'));
     });
     return unsubscribe;
   }, [navigation]);
 
+  // Start tracking
   const startTracking = async () => {
-    if (!selectedVehicleId) return Alert.alert('Select a vehicle first');
+    if (!selectedVehicleId) {
+      return Alert.alert('Select a vehicle first');
+    }
     const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') return Alert.alert('Location permission denied');
-    setCoords([]);
+    if (status !== 'granted') {
+      return Alert.alert('Location permission denied');
+    }
+
+    // Get initial location
+    const initialLoc = await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.High,
+    });
+    const { latitude, longitude } = initialLoc.coords;
+
+    // Seed coordsRef and state
+    coordsRef.current = [{ latitude, longitude }];
+    setCoords([...coordsRef.current]);
+
+    // Center map
+    setRegion({
+      latitude,
+      longitude,
+      latitudeDelta: 0.01,
+      longitudeDelta: 0.01,
+    });
+
+    // Start timer
     startTime.current = Date.now();
+    setTracking(true);
+
+    // Subscribe to location updates
     subscription.current = await Location.watchPositionAsync(
       { accuracy: Location.Accuracy.High, timeInterval: 1000, distanceInterval: 1 },
-      loc => setCoords(c => [...c, loc.coords])
+      loc => {
+        const { latitude: lat, longitude: lon } = loc.coords;
+        coordsRef.current.push({ latitude: lat, longitude: lon });
+        setCoords([...coordsRef.current]);
+        setRegion(r => ({ ...r, latitude: lat, longitude: lon }));
+      }
     );
-    setTracking(true);
   };
 
+  // Stop tracking
   const stopTracking = async () => {
     subscription.current?.remove();
     setTracking(false);
+
+    // Use authoritative coordsRef
+    let runCoords = coordsRef.current;
+
+    // Fallback if empty
+    if (runCoords.length === 0) {
+      const loc = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.High,
+      });
+      runCoords = [{
+        latitude: loc.coords.latitude,
+        longitude: loc.coords.longitude,
+      }];
+    }
+
     const duration = (Date.now() - startTime.current) / 1000;
-    const avgSpeed = coords.reduce((sum, p) => sum + (p.speed || 0), 0) / coords.length || 0;
+    const avgSpeed =
+      runCoords.reduce((sum, p) => sum + (p.speed || 0), 0) / runCoords.length || 0;
+
     try {
-      await axios.post(`${API_BASE}/api/routes`, { trailId, coords, duration, avgSpeed, vehicleId: selectedVehicleId });
-      navigation.replace('Leaderboard', { trailId, name });
+      const res = await axios.post(`${API_BASE}/api/routes`, {
+        trailId,
+        coords: runCoords,
+        duration,
+        avgSpeed,
+        vehicleId: selectedVehicleId,
+      });
+      navigation.replace('RunDetail', { run: res.data, trailName: name });
     } catch (err) {
       Alert.alert('Upload failed', err.response?.data?.error || err.message);
     }
+
+    // Reset coordsRef for next run
+    coordsRef.current = [];
+    setCoords([]);
   };
 
-  // Set start/stop button in header
+  // Place Start/Stop in header
   useLayoutEffect(() => {
     navigation.setOptions({
       title: name,
@@ -64,6 +146,7 @@ export default function Tracker({ route, navigation }) {
     });
   }, [navigation, tracking, selectedVehicleId]);
 
+  // Loading vehicles
   if (vehicles === null) {
     return (
       <View style={styles.center}>
@@ -72,40 +155,68 @@ export default function Tracker({ route, navigation }) {
     );
   }
 
+  // No vehicles yet
+  if (vehicles.length === 0) {
+    return (
+      <View style={styles.center}>
+        <Button
+          title="Add a Vehicle"
+          onPress={() => navigation.navigate('AddVehicle')}
+        />
+      </View>
+    );
+  }
+
+  // Show map when tracking
+  if (tracking && region) {
+    return (
+      <MapView style={styles.map} region={region}>
+        {coords.length > 0 && (
+          <>
+            <Polyline coordinates={coords} strokeWidth={4} />
+            <Marker coordinate={coords[coords.length - 1]} />
+          </>
+        )}
+      </MapView>
+    );
+  }
+
+  // Vehicle selector
   return (
     <View style={styles.container}>
-      {vehicles.length === 0 ? (
-        <Button title="Add a Vehicle" onPress={() => navigation.navigate('AddVehicle')} />
-      ) : (
-        <>
-          <Text style={styles.subheader}>Select Vehicle</Text>
-          <FlatList
-            data={vehicles}
-            keyExtractor={v => v.id}
-            extraData={selectedVehicleId}
-            renderItem={({ item }) => (
-              <TouchableOpacity
-                style={[
-                  styles.vehicleItem,
-                  item.id === selectedVehicleId && styles.selectedVehicle,
-                ]}
-                onPress={() => setSelectedVehicleId(item.id)}
-              >
-                <Text>{item.make} {item.model} ({item.year})</Text>
-              </TouchableOpacity>
-            )}
-          />
-        </>
-      )}
+      <Text style={styles.subheader}>Select Your Vehicle</Text>
+      {vehicles.map(v => (
+        <TouchableOpacity
+          key={v.id}
+          style={[
+            styles.vehicleItem,
+            v.id === selectedVehicleId && styles.selectedVehicle,
+          ]}
+          onPress={() => setSelectedVehicleId(v.id)}
+        >
+          <Text>
+            {v.make} {v.model} ({v.year})
+          </Text>
+        </TouchableOpacity>
+      ))}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex:1, padding:16 },
-  center: { flex:1, justifyContent:'center', alignItems:'center' },
-  subheader: { marginBottom:8, fontWeight:'500' },
-  vehicleItem: { padding:12, borderWidth:1, borderColor:'#ccc', borderRadius:4, marginBottom:8 },
-  selectedVehicle: { borderColor:'#007AFF', backgroundColor:'#E6F0FF' },
+  container: { flex: 1, padding: 16 },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  map: { flex: 1 },
+  subheader: { marginBottom: 8, fontWeight: '500' },
+  vehicleItem: {
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 4,
+    marginBottom: 8,
+  },
+  selectedVehicle: {
+    borderColor: '#007AFF',
+    backgroundColor: '#E6F0FF',
+  },
 });
-

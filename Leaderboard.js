@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, FlatList, ActivityIndicator, Button, StyleSheet } from 'react-native';
+import { View, Text, FlatList, ActivityIndicator, StyleSheet, TouchableOpacity, Button } from 'react-native';
 import axios from 'axios';
 import { API_BASE } from './config';
 
@@ -28,9 +28,15 @@ export default function Leaderboard({ route, navigation }) {
         data={runs}
         keyExtractor={(_,i)=>String(i)}
         renderItem={({item,index})=>(
-          <View style={styles.item}>
+            <TouchableOpacity
+              style={styles.item}
+              onPress={() =>
+                navigation.navigate('RunDetail', { run: item, trailName: name })
+              }
+            >
+
             <Text>{index+1}. {Math.round(item.duration)}s @ {item.avgSpeed.toFixed(1)} m/s</Text>
-          </View>
+          </TouchableOpacity>
         )}
       />
       <Button title="Back to Trails" onPress={()=>navigation.popToTop()} />

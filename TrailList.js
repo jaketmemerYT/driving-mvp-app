@@ -1,17 +1,41 @@
-import React, { useEffect, useState } from 'react';
-import { View, FlatList, TouchableOpacity, Text, ActivityIndicator, StyleSheet } from 'react-native';
+// TrailList.js
+import React, { useEffect, useState, useLayoutEffect } from 'react';
+import {
+  View,
+  FlatList,
+  TouchableOpacity,
+  Text,
+  ActivityIndicator,
+  StyleSheet,
+  Button,
+} from 'react-native';
 import axios from 'axios';
 import { API_BASE } from './config';
 
 export default function TrailList({ navigation }) {
   const [trails, setTrails] = useState(null);
 
+  // Inject Vehicles button into the header
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerRight: () => (
+        <Button
+          title="Vehicles"
+          onPress={() => navigation.navigate('Vehicles')}
+        />
+      ),
+    });
+  }, [navigation]);
+
+  // Fetch trailheads
   useEffect(() => {
-    axios.get(`${API_BASE}/api/trailheads`)
+    axios
+      .get(`${API_BASE}/api/trailheads`)
       .then(res => setTrails(res.data))
       .catch(console.error);
   }, []);
 
+  // Loading state
   if (!trails) {
     return (
       <View style={styles.center}>
@@ -20,6 +44,7 @@ export default function TrailList({ navigation }) {
     );
   }
 
+  // List of trails
   return (
     <FlatList
       data={trails}
@@ -27,7 +52,12 @@ export default function TrailList({ navigation }) {
       renderItem={({ item }) => (
         <TouchableOpacity
           style={styles.item}
-          onPress={() => navigation.navigate('Tracker', { trailId: item.id, name: item.name })}
+          onPress={() =>
+            navigation.navigate('Tracker', {
+              trailId: item.id,
+              name: item.name,
+            })
+          }
         >
           <Text style={styles.title}>{item.name}</Text>
           <Text style={styles.subtitle}>{item.difficulty}</Text>
