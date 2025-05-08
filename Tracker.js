@@ -57,17 +57,15 @@ export default function Tracker({ route, navigation }) {
       return Alert.alert('Location permission denied');
     }
 
-    // Get initial location
-    const initialLoc = await Location.getCurrentPositionAsync({
+    // Get initial location and seed coords
+    const { coords: initial } = await Location.getCurrentPositionAsync({
       accuracy: Location.Accuracy.High,
     });
-    const { latitude, longitude } = initialLoc.coords;
-
-    // Seed coordsRef and state
+    const { latitude, longitude } = initial;
     coordsRef.current = [{ latitude, longitude }];
-    setCoords([...coordsRef.current]);
+    setCoords([{ latitude, longitude }]);
 
-    // Center map
+    // Center map on initial location
     setRegion({
       latitude,
       longitude,
@@ -75,7 +73,7 @@ export default function Tracker({ route, navigation }) {
       longitudeDelta: 0.01,
     });
 
-    // Start timer
+    // Start timer and tracking state
     startTime.current = Date.now();
     setTracking(true);
 
@@ -99,15 +97,12 @@ export default function Tracker({ route, navigation }) {
     // Use authoritative coordsRef
     let runCoords = coordsRef.current;
 
-    // Fallback if empty
+    // Fallback if still empty
     if (runCoords.length === 0) {
-      const loc = await Location.getCurrentPositionAsync({
+      const { coords: fallback } = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.High,
       });
-      runCoords = [{
-        latitude: loc.coords.latitude,
-        longitude: loc.coords.longitude,
-      }];
+      runCoords = [{ latitude: fallback.latitude, longitude: fallback.longitude }];
     }
 
     const duration = (Date.now() - startTime.current) / 1000;
@@ -171,12 +166,8 @@ export default function Tracker({ route, navigation }) {
   if (tracking && region) {
     return (
       <MapView style={styles.map} region={region}>
-        {coords.length > 0 && (
-          <>
-            <Polyline coordinates={coords} strokeWidth={4} />
-            <Marker coordinate={coords[coords.length - 1]} />
-          </>
-        )}
+        <Polyline coordinates={coords} strokeWidth={4} />
+        <Marker coordinate={coords[coords.length - 1]} />
       </MapView>
     );
   }

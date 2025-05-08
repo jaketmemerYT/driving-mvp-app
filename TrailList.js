@@ -1,5 +1,5 @@
 // TrailList.js
-import React, { useEffect, useState, useLayoutEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   FlatList,
@@ -7,7 +7,6 @@ import {
   Text,
   ActivityIndicator,
   StyleSheet,
-  Button,
 } from 'react-native';
 import axios from 'axios';
 import { API_BASE } from './config';
@@ -15,27 +14,14 @@ import { API_BASE } from './config';
 export default function TrailList({ navigation }) {
   const [trails, setTrails] = useState(null);
 
-  // Inject Vehicles button into the header
-  useLayoutEffect(() => {
-    navigation.setOptions({
-      headerRight: () => (
-        <Button
-          title="Vehicles"
-          onPress={() => navigation.navigate('Vehicles')}
-        />
-      ),
-    });
-  }, [navigation]);
-
-  // Fetch trailheads
+  // Fetch trailheads on mount
   useEffect(() => {
     axios
       .get(`${API_BASE}/api/trailheads`)
       .then(res => setTrails(res.data))
-      .catch(console.error);
+      .catch(err => console.error('Error fetching trails:', err));
   }, []);
 
-  // Loading state
   if (!trails) {
     return (
       <View style={styles.center}>
@@ -44,7 +30,6 @@ export default function TrailList({ navigation }) {
     );
   }
 
-  // List of trails
   return (
     <FlatList
       data={trails}

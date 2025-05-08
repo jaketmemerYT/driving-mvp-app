@@ -18,11 +18,28 @@ const Tab = createBottomTabNavigator();
 // Stack for route-related screens
 function RoutesStack() {
   return (
-    <Stack.Navigator initialRouteName="Trails">
+    <Stack.Navigator
+      initialRouteName="Trails"
+      screenOptions={{
+        headerTitleAlign: 'center',
+        headerStyle: { backgroundColor: '#fff' },
+        headerTitleStyle: { fontSize: 18 },
+      }}
+    >
       <Stack.Screen
         name="Trails"
         component={TrailList}
-        options={{ title: 'Trails' }}
+        options={({ navigation }) => ({
+          title: 'Trails',
+          headerRight: () => (
+            <MaterialIcons
+              name="directions-car"
+              size={24}
+              onPress={() => navigation.navigate('Vehicles')}
+              style={{ marginRight: 16 }}
+            />
+          ),
+        })}
       />
       <Stack.Screen
         name="Tracker"
@@ -46,7 +63,14 @@ function RoutesStack() {
 // Stack for vehicle management
 function VehiclesStack() {
   return (
-    <Stack.Navigator initialRouteName="VehicleList">
+    <Stack.Navigator
+      initialRouteName="VehicleList"
+      screenOptions={{
+        headerTitleAlign: 'center',
+        headerStyle: { backgroundColor: '#fff' },
+        headerTitleStyle: { fontSize: 18 },
+      }}
+    >
       <Stack.Screen
         name="VehicleList"
         component={VehicleList}
@@ -74,25 +98,27 @@ function VehiclesStack() {
 export default function App() {
   return (
     <NavigationContainer>
-      <Tab.Navigator initialRouteName="Routes" screenOptions={{ headerShown: false }}>
-        <Tab.Screen
-          name="Routes"
-          component={RoutesStack}
-          options={{
-            tabBarIcon: ({ color, size }) => (
-              <MaterialIcons name="map" size={size} color={color} />
-            ),
-          }}
-        />
-        <Tab.Screen
-          name="Vehicles"
-          component={VehiclesStack}
-          options={{
-            tabBarIcon: ({ color, size }) => (
-              <MaterialIcons name="directions-car" size={size} color={color} />
-            ),
-          }}
-        />
+      <Tab.Navigator
+        initialRouteName="Routes"
+        screenOptions={({ route }) => ({
+          headerShown: false,
+          tabBarIcon: ({ color, size }) => {
+            const icons = {
+              Routes: 'map',
+              Vehicles: 'directions-car',
+            };
+            return (
+              <MaterialIcons
+                name={icons[route.name]}
+                size={size}
+                color={color}
+              />
+            );
+          },
+        })}
+      >
+        <Tab.Screen name="Routes" component={RoutesStack} />
+        <Tab.Screen name="Vehicles" component={VehiclesStack} />
       </Tab.Navigator>
     </NavigationContainer>
   );
