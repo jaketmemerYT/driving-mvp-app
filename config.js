@@ -1,1 +1,1 @@
-﻿export const API_BASE = '$( (Invoke-RestMethod 'http://127.0.0.1:4040/api/tunnels').Tunnels.PublicURL )';
+﻿export const API_BASE = 'https://28ab-192-183-219-131.ngrok-free.app';
