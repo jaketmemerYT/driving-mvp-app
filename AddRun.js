@@ -1,110 +1,137 @@
 // AddRun.js
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useContext, useLayoutEffect } from 'react';
 import {
-  View,
-  Text,
-  TextInput,
-  Button,
-  Alert,
-  StyleSheet,
+  View, Text, Button, TextInput,
+  FlatList, TouchableOpacity, StyleSheet, Alert, ScrollView
 } from 'react-native';
-import MapView, { Marker, Circle } from 'react-native-maps';
-import * as Location from 'expo-location';
+import axios from 'axios';
+import { useNavigation } from '@react-navigation/native';
+import { UserContext } from './UserContext';
+import { API_BASE }   from './config';
 
-export default function AddRun({ navigation }) {
-  const [trailName, setTrailName] = useState('');
-  const [startCoords, setStartCoords] = useState(null);
-  const [endCoords, setEndCoords] = useState(null);
-  const mapRef = useRef(null);
+export default function AddRun() {
+  const nav = useNavigation();
+  const { user } = useContext(UserContext);
 
-  // obtain user's current location for start
+  const [trailheads, setTrailheads] = useState([]);
+  const [groups, setGroups]         = useState([]);
+  const [categories, setCategories] = useState([]);
+  const [vehicles, setVehicles]     = useState([]);
+
+  const [name, setName]             = useState('');
+  const [trailId, setTrailId]       = useState(null);
+  const [groupId, setGroupId]       = useState(null);
+  const [selCats, setSelCats]       = useState([]);
+  const [vehicleId, setVehicleId]   = useState(null);
+
+  useLayoutEffect(() => {
+    nav.setOptions({ title: 'New Run' });
+  }, [nav]);
+
   useEffect(() => {
-    (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission denied', 'Location permission is required to start a run.');
-        return;
-      }
-      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-      setStartCoords({
-        latitude: loc.coords.latitude,
-        longitude: loc.coords.longitude,
-      });
-    })();
+    Promise.all([
+      axios.get(`${API_BASE}/api/trailheads`),
+      axios.get(`${API_BASE}/api/groups`),
+      axios.get(`${API_BASE}/api/categories`),
+      axios.get(`${API_BASE}/api/vehicles`),
+    ]).then(([tRes, gRes, cRes, vRes]) => {
+      setTrailheads(tRes.data);
+      setGroups(gRes.data);
+      setCategories(cRes.data);
+      setVehicles(vRes.data);
+    }).catch(console.error);
   }, []);
 
-  // center map on end marker when placed
-  useEffect(() => {
-    if (endCoords && mapRef.current) {
-      mapRef.current.animateToRegion({
-        ...endCoords,
-        latitudeDelta: 0.01,
-        longitudeDelta: 0.01,
-      });
-    }
-  }, [endCoords]);
-
-  const handleMapPress = e => {
-    setEndCoords(e.nativeEvent.coordinate);
+  const toggleCat = id => {
+    setSelCats(s => s.includes(id) ? s.filter(x=>x!==id) : [...s,id]);
   };
 
-  const handleBegin = () => {
-    if (!trailName.trim()) {
-      Alert.alert('Trail name required');
-      return;
-    }
-    if (!startCoords) {
-      Alert.alert('Waiting for start location');
-      return;
-    }
-    navigation.navigate('Tracker', {
-      trailName,
-      startCoords,
-      endCoords,  // may be null: Tracker will stop manually
+  const begin = () => {
+    if (!user) return Alert.alert('No user selected');
+    if (!trailId) return Alert.alert('Pick a trail');
+    if (!groupId) return Alert.alert('Pick a group');
+    if (!vehicleId) return Alert.alert('Pick a vehicle');
+
+    nav.navigate('Tracker', {
+      userId:       user.id,
+      trailId,
+      trailName:    name || trailheads.find(t=>t.id===trailId)?.name,
+      groupId,
+      categoryIds:  selCats,
     });
   };
 
   return (
-    <View style={styles.container}>
+    <ScrollView style={styles.container}>
+      <Text style={styles.label}>Optional Run Name</Text>
       <TextInput
         style={styles.input}
-        placeholder="Trail Name"
-        value={trailName}
-        onChangeText={setTrailName}
+        placeholder="Name (or leave blank)"
+        value={name} onChangeText={setName}
       />
-      {startCoords && (
-        <MapView
-          ref={mapRef}
-          style={styles.map}
-          initialRegion={{
-            ...startCoords,
-            latitudeDelta: 0.01,
-            longitudeDelta: 0.01,
-          }}
-          onPress={handleMapPress}
+
+      <Text style={styles.label}>Choose Trail</Text>
+      {trailheads.map(t => (
+        <TouchableOpacity
+          key={t.id}
+          style={[styles.item, trailId===t.id && styles.selected]}
+          onPress={()=>setTrailId(t.id)}
         >
-          <Marker coordinate={startCoords} title="Start" />
-          {endCoords && (
-            <>
-              <Marker coordinate={endCoords} title="Finish" />
-              <Circle center={endCoords} radius={20} />
-            </>
-          )}
-        </MapView>
-      )}
-      <Button title="Begin Run" onPress={handleBegin} disabled={!trailName || !startCoords} />
-    </View>
+          <Text>{t.name}</Text>
+        </TouchableOpacity>
+      ))}
+
+      <Text style={styles.label}>Choose Group</Text>
+      {groups.map(g => (
+        <TouchableOpacity
+          key={g.id}
+          style={[styles.item, groupId===g.id && styles.selected]}
+          onPress={()=>setGroupId(g.id)}
+        >
+          <Text>{g.name}</Text>
+        </TouchableOpacity>
+      ))}
+
+      <Text style={styles.label}>Tags (Categories)</Text>
+      <View style={styles.chipContainer}>
+        {categories.map(c => (
+          <TouchableOpacity
+            key={c.id}
+            style={[styles.chip, selCats.includes(c.id)&&styles.chipSel]}
+            onPress={()=>toggleCat(c.id)}
+          >
+            <Text style={selCats.includes(c.id)&&styles.chipTextSel}>{c.name}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      <Text style={styles.label}>Select Vehicle</Text>
+      {vehicles.map(v => (
+        <TouchableOpacity
+          key={v.id}
+          style={[styles.item, vehicleId===v.id && styles.selected]}
+          onPress={()=>setVehicleId(v.id)}
+        >
+          <Text>{`${v.make} ${v.model} (${v.year})`}</Text>
+        </TouchableOpacity>
+      ))}
+
+      <Button title="Begin Run" onPress={begin} />
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  input: {
-    margin: 16,
-    borderWidth: 1,
-    borderColor: '#ccc',
-    borderRadius: 4,
-    padding: 8,
+  container:{flex:1,padding:16},
+  label:    {fontWeight:'500',marginTop:16,marginBottom:8},
+  input:    {borderWidth:1,borderColor:'#ccc',borderRadius:4,padding:8},
+  item:     {padding:12,borderWidth:1,borderColor:'#ccc',borderRadius:4,marginBottom:8},
+  selected: {borderColor:'#007AFF',backgroundColor:'#E6F0FF'},
+  chipContainer:{flexDirection:'row',flexWrap:'wrap',marginBottom:16},
+  chip:     {
+    paddingHorizontal:12,paddingVertical:6,borderRadius:16,
+    backgroundColor:'#EEE',marginRight:8,marginBottom:8
   },
-  map: { flex: 1 },
+  chipSel:  {backgroundColor:'#007AFF'},
+  chipTextSel:{color:'#FFF'}
 });
