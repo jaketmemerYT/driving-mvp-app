@@ -2,6 +2,7 @@
 import React, {
   useState,
   useLayoutEffect,
+  useContext,
   useCallback
 } from 'react';
 import {
@@ -18,8 +19,10 @@ import MapView, { Polyline } from 'react-native-maps';
 import axios from 'axios';
 import { useFocusEffect } from '@react-navigation/native';
 import { API_BASE } from './config';
+import { UserContext } from './UserContext';
 
 export default function RunList({ navigation }) {
+  const { user } = useContext(UserContext);
   const [runs, setRuns]                   = useState(null);
   const [trailsMap, setTrailsMap]         = useState({});
   const [trailCatsMap, setTrailCatsMap]   = useState({});
@@ -28,7 +31,6 @@ export default function RunList({ navigation }) {
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [filterCatIds, setFilterCatIds]   = useState([]);
 
-  // Header + "New Run" button
   useLayoutEffect(() => {
     navigation.setOptions({
       title: 'My Runs',
@@ -38,39 +40,34 @@ export default function RunList({ navigation }) {
     });
   }, [navigation]);
 
-  // Reload all data whenever this screen is focused
   useFocusEffect(
     useCallback(() => {
+      if (!user) {
+        setRuns([]);
+        return;
+      }
       const loadAll = async () => {
-        // Fetch runs, trails, categories, groups
         const [rRes, tRes, cRes, gRes] = await Promise.all([
-          axios.get(`${API_BASE}/api/routes`),
+          axios.get(`${API_BASE}/api/routes?userId=${user.id}`),
           axios.get(`${API_BASE}/api/trailheads`),
           axios.get(`${API_BASE}/api/categories`),
           axios.get(`${API_BASE}/api/groups`),
         ]);
-
-        // Sort and store runs
         setRuns(rRes.data.sort((a, b) => b.timestamp - a.timestamp));
 
-        // Build trailId → name map
         const tMap = {};
-        tRes.data.forEach(t => {
-          tMap[t.id] = t.name;
-        });
+        tRes.data.forEach(t => (tMap[t.id] = t.name));
         setTrailsMap(tMap);
 
         setCategories(cRes.data);
         setGroups(gRes.data);
 
-        // Default to first group if none selected
-        if (gRes.data.length > 0 && !selectedGroup) {
+        if (gRes.data.length > 0) {
           const grp = gRes.data[0];
           setSelectedGroup(grp);
           setFilterCatIds(grp.categoryIds || []);
         }
 
-        // Fetch trail → category mappings
         const tcMap = {};
         await Promise.all(
           tRes.data.map(async t => {
@@ -82,13 +79,19 @@ export default function RunList({ navigation }) {
         );
         setTrailCatsMap(tcMap);
       };
-
       loadAll().catch(console.error);
-      // no cleanup needed
-    }, [selectedGroup])
+    }, [user])
   );
 
-  // Still loading?
+  if (!user) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.message}>
+          Please select a user in the Profile tab.
+        </Text>
+      </View>
+    );
+  }
   if (!runs || !categories.length || !groups.length) {
     return (
       <View style={styles.center}>
@@ -97,20 +100,17 @@ export default function RunList({ navigation }) {
     );
   }
 
-  // Filter according to selected group & manual chips
   const visibleRuns = runs.filter(r => {
     const tCats = trailCatsMap[r.trailId] || [];
     if (!selectedGroup.categoryIds.length) return true;
-    const baseOK = tCats.some(id => selectedGroup.categoryIds.includes(id));
-    const manualOK =
-      filterCatIds.length === 0 ||
-      tCats.some(id => filterCatIds.includes(id));
-    return baseOK && manualOK;
+    const inGroup = tCats.some(id => selectedGroup.categoryIds.includes(id));
+    const inManual =
+      filterCatIds.length === 0 || tCats.some(id => filterCatIds.includes(id));
+    return inGroup && inManual;
   });
 
   return (
     <View style={styles.container}>
-      {/* Group picker */}
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
@@ -118,7 +118,7 @@ export default function RunList({ navigation }) {
         contentContainerStyle={styles.chipContainer}
       >
         {groups.map(g => {
-          const sel = selectedGroup?.id === g.id;
+          const sel = selectedGroup.id === g.id;
           return (
             <TouchableOpacity
               key={g.id}
@@ -136,7 +136,6 @@ export default function RunList({ navigation }) {
         })}
       </ScrollView>
 
-      {/* Category filter chips */}
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
@@ -150,9 +149,11 @@ export default function RunList({ navigation }) {
               key={cat.id}
               style={[styles.chip, sel && styles.chipSelected]}
               onPress={() =>
-                setFilterCatIds(sel
-                  ? filterCatIds.filter(x => x !== cat.id)
-                  : [...filterCatIds, cat.id])
+                setFilterCatIds(
+                  sel
+                    ? filterCatIds.filter(x => x !== cat.id)
+                    : [...filterCatIds, cat.id]
+                )
               }
             >
               <Text style={[styles.chipText, sel && styles.chipTextSelected]}>
@@ -190,16 +191,14 @@ export default function RunList({ navigation }) {
                 }
               >
                 <Text style={styles.title}>{trailName}</Text>
-                {/* Category badges */}
                 <View style={styles.badgesRow}>
-                  {tCats.map(cid => {
-                    const cat = categories.find(c => c.id === cid);
-                    return cat ? (
-                      <View style={styles.badge} key={cid}>
-                        <Text style={styles.badgeText}>{cat.name}</Text>
-                      </View>
-                    ) : null;
-                  })}
+                  {tCats.map(cid => (
+                    <View style={styles.badge} key={cid}>
+                      <Text style={styles.badgeText}>
+                        {categories.find(c => c.id === cid)?.name}
+                      </Text>
+                    </View>
+                  ))}
                 </View>
                 {previewRegion && (
                   <MapView
@@ -225,24 +224,25 @@ export default function RunList({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container:    { flex: 1 },
-  center:       { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  chipScroll:   { maxHeight: 40, marginVertical: 4 },
-  chipContainer:{ paddingHorizontal: 8 },
-  chip:         {
+  container:     { flex: 1 },
+  center:        { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  message:       { color: '#666', textAlign: 'center', padding: 16 },
+  chipScroll:    { maxHeight: 40, marginVertical: 4 },
+  chipContainer: { paddingHorizontal: 8 },
+  chip: {
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 16,
     backgroundColor: '#EEE',
     marginHorizontal: 4,
   },
-  chipSelected:      { backgroundColor: '#007AFF' },
-  chipText:          { color: '#333' },
-  chipTextSelected:  { color: '#FFF' },
-  item:         { padding: 16, borderBottomWidth: 1, borderColor: '#EEE' },
-  title:        { fontSize: 16, fontWeight: 'bold' },
-  badgesRow:    { flexDirection: 'row', flexWrap: 'wrap', marginVertical: 4 },
-  badge:        {
+  chipSelected:     { backgroundColor: '#007AFF' },
+  chipText:         { color: '#333' },
+  chipTextSelected: { color: '#FFF' },
+  item:          { padding: 16, borderBottomWidth: 1, borderColor: '#EEE' },
+  title:         { fontSize: 16, fontWeight: 'bold' },
+  badgesRow:     { flexDirection: 'row', flexWrap: 'wrap', marginTop: 4 },
+  badge:         {
     backgroundColor: '#CCC',
     paddingHorizontal: 6,
     paddingVertical: 2,
@@ -250,8 +250,8 @@ const styles = StyleSheet.create({
     marginRight: 4,
     marginBottom: 4,
   },
-  badgeText:    { fontSize: 12, color: '#333' },
-  preview:      { height: 80, marginVertical: 8 },
-  subtitle:     { color: '#666' },
-  empty:        { textAlign: 'center', marginTop: 32, color: '#666' },
+  badgeText:     { fontSize: 12, color: '#333' },
+  preview:       { height: 80, marginVertical: 8 },
+  subtitle:      { color: '#666' },
+  empty:         { textAlign: 'center', marginTop: 32, color: '#666' },
 });

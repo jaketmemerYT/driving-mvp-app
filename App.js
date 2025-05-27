@@ -7,63 +7,34 @@ import { createBottomTabNavigator }    from '@react-navigation/bottom-tabs';
 import { MaterialIcons } from '@expo/vector-icons';
 
 import { UserProvider } from './UserContext';
-import UserList    from './UserList';
-import AddUser     from './AddUser';
-import RunList     from './RunList';
-import AddRun      from './AddRun';
-import Tracker     from './Tracker';
-import RunDetail   from './RunDetail';
-import AddTrail   from './AddTrail';
-import TrailList   from './TrailList';
-import VehicleList from './VehicleList';
-import AddVehicle  from './AddVehicle';
-import GroupList   from './GroupList';
-import AddGroup    from './AddGroup';
-import CategoryList  from './CategoryList';
-import AddCategory   from './AddCategory';
+import Home            from './Home';         // your feed screen
+import TrailList       from './TrailList';
+import TrailDetail     from './TrailDetail';
+import AddTrail        from './AddTrail';
+import RunList         from './RunList';
+import AddRun          from './AddRun';
+import Tracker         from './Tracker';
+import RunDetail       from './RunDetail';
+import GroupList       from './GroupList';
+import AddGroup        from './AddGroup';
+import CategoryList    from './CategoryList';
+import AddCategory     from './AddCategory';
+import VehicleList     from './VehicleList';
+import AddVehicle      from './AddVehicle';
+import UserList        from './UserList';
+import AddUser         from './AddUser';
 
 const Stack = createNativeStackNavigator();
 const Tab   = createBottomTabNavigator();
 
-function ProfileStack() {
+function HomeStack() {
   return (
     <Stack.Navigator>
+      {/* renamed route to "Feed" */}
       <Stack.Screen
-        name="UserList"
-        component={UserList}
-        options={{ title: 'Select User' }}
-      />
-      <Stack.Screen
-        name="AddUser"
-        component={AddUser}
-        options={{ title: 'New User' }}
-      />
-    </Stack.Navigator>
-  );
-}
-
-function RunsStack() {
-  return (
-    <Stack.Navigator>
-      <Stack.Screen
-        name="RunList"
-        component={RunList}
-        options={{ title: 'My Runs' }}
-      />
-      <Stack.Screen
-        name="AddRun"
-        component={AddRun}
-        options={{ title: 'New Run' }}
-      />
-      <Stack.Screen
-        name="Tracker"
-        component={Tracker}
-        options={{ title: 'Tracker' }}
-      />
-      <Stack.Screen
-        name="RunDetail"
-        component={RunDetail}
-        options={{ title: 'Run Detail' }}
+        name="Feed"
+        component={Home}
+        options={{ title: 'Home' }}
       />
     </Stack.Navigator>
   );
@@ -86,6 +57,11 @@ function TrailsStack() {
         })}
       />
       <Stack.Screen
+        name="TrailDetail"
+        component={TrailDetail}
+        options={{ title: 'Trail Detail' }}
+      />
+      <Stack.Screen
         name="AddTrail"
         component={AddTrail}
         options={{ title: 'New Trail' }}
@@ -99,6 +75,17 @@ function TrailsStack() {
   );
 }
 
+function RunsStack() {
+  return (
+    <Stack.Navigator>
+      <Stack.Screen name="RunList"   component={RunList}   options={{ title: 'My Runs'    }} />
+      <Stack.Screen name="AddRun"    component={AddRun}    options={{ title: 'New Run'    }} />
+      <Stack.Screen name="RunDetail" component={RunDetail} options={{ title: 'Run Detail' }} />
+      <Stack.Screen name="Tracker"   component={Tracker}   options={{ title: 'Tracker'    }} />
+    </Stack.Navigator>
+  );
+}
+
 function GroupsStack() {
   return (
     <Stack.Navigator>
@@ -108,18 +95,11 @@ function GroupsStack() {
         options={({ navigation }) => ({
           title: 'Groups',
           headerRight: () => (
-            <Button
-              title="New"
-              onPress={() => navigation.navigate('AddGroup')}
-            />
+            <Button title="New" onPress={() => navigation.navigate('AddGroup')} />
           ),
         })}
       />
-      <Stack.Screen
-        name="AddGroup"
-        component={AddGroup}
-        options={{ title: 'New Group' }}
-      />
+      <Stack.Screen name="AddGroup" component={AddGroup} options={{ title: 'New Group' }} />
     </Stack.Navigator>
   );
 }
@@ -133,18 +113,11 @@ function CategoriesStack() {
         options={({ navigation }) => ({
           title: 'Categories',
           headerRight: () => (
-            <Button
-              title="New"
-              onPress={() => navigation.navigate('AddCategory')}
-            />
+            <Button title="New" onPress={() => navigation.navigate('AddCategory')} />
           ),
         })}
       />
-      <Stack.Screen
-        name="AddCategory"
-        component={AddCategory}
-        options={{ title: 'New Category' }}
-      />
+      <Stack.Screen name="AddCategory" component={AddCategory} options={{ title: 'New Category' }} />
     </Stack.Navigator>
   );
 }
@@ -156,20 +129,22 @@ function VehiclesStack() {
         name="VehicleList"
         component={VehicleList}
         options={({ navigation }) => ({
-          title: 'Vehicles',
+          title: 'My Vehicles',
           headerRight: () => (
-            <Button
-              title="New"
-              onPress={() => navigation.navigate('AddVehicle')}
-            />
+            <Button title="New" onPress={() => navigation.navigate('AddVehicle')} />
           ),
         })}
       />
-      <Stack.Screen
-        name="AddVehicle"
-        component={AddVehicle}
-        options={{ title: 'New Vehicle' }}
-      />
+      <Stack.Screen name="AddVehicle" component={AddVehicle} options={{ title: 'New Vehicle' }} />
+    </Stack.Navigator>
+  );
+}
+
+function ProfileStack() {
+  return (
+    <Stack.Navigator>
+      <Stack.Screen name="UserList" component={UserList} options={{ title: 'Select User' }} />
+      <Stack.Screen name="AddUser"  component={AddUser}  options={{ title: 'New User'    }} />
     </Stack.Navigator>
   );
 }
@@ -178,64 +153,74 @@ export default function App() {
   return (
     <UserProvider>
       <NavigationContainer>
-        <Tab.Navigator initialRouteName="Profile">
+        <Tab.Navigator initialRouteName="HomeTab" screenOptions={{ headerShown: false }}>
           <Tab.Screen
-            name="Profile"
-            component={ProfileStack}
+            name="HomeTab"
+            component={HomeStack}
             options={{
-              headerShown: false,
+              tabBarLabel: 'Home',
               tabBarIcon: ({ color, size }) => (
-                <MaterialIcons name="person" size={size} color={color} />
+                <MaterialIcons name="home" size={size} color={color} />
               ),
             }}
           />
           <Tab.Screen
-            name="Runs"
-            component={RunsStack}
-            options={{
-              headerShown: false,
-              tabBarIcon: ({ color, size }) => (
-                <MaterialIcons name="timer" size={size} color={color} />
-              ),
-            }}
-          />
-          <Tab.Screen
-            name="Trails"
+            name="TrailsTab"
             component={TrailsStack}
             options={{
-              headerShown: false,
+              tabBarLabel: 'Trails',
               tabBarIcon: ({ color, size }) => (
                 <MaterialIcons name="map" size={size} color={color} />
               ),
             }}
           />
           <Tab.Screen
-            name="Groups"
+            name="RunsTab"
+            component={RunsStack}
+            options={{
+              tabBarLabel: 'Runs',
+              tabBarIcon: ({ color, size }) => (
+                <MaterialIcons name="timer" size={size} color={color} />
+              ),
+            }}
+          />
+          <Tab.Screen
+            name="GroupsTab"
             component={GroupsStack}
             options={{
-              headerShown: false,
+              tabBarLabel: 'Groups',
               tabBarIcon: ({ color, size }) => (
                 <MaterialIcons name="group" size={size} color={color} />
               ),
             }}
           />
           <Tab.Screen
-            name="Categories"
+            name="CategoriesTab"
             component={CategoriesStack}
             options={{
-              headerShown: false,
+              tabBarLabel: 'Categories',
               tabBarIcon: ({ color, size }) => (
                 <MaterialIcons name="label" size={size} color={color} />
               ),
             }}
           />
           <Tab.Screen
-            name="Vehicles"
+            name="VehiclesTab"
             component={VehiclesStack}
             options={{
-              headerShown: false,
+              tabBarLabel: 'Vehicles',
               tabBarIcon: ({ color, size }) => (
                 <MaterialIcons name="directions-car" size={size} color={color} />
+              ),
+            }}
+          />
+          <Tab.Screen
+            name="ProfileTab"
+            component={ProfileStack}
+            options={{
+              tabBarLabel: 'Profile',
+              tabBarIcon: ({ color, size }) => (
+                <MaterialIcons name="person" size={size} color={color} />
               ),
             }}
           />

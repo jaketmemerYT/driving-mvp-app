@@ -1,31 +1,35 @@
 // UserList.js
-import React, { useState, useEffect, useContext, useLayoutEffect } from 'react';
+import React, { useContext, useState } from 'react';
 import {
-  View, FlatList, TouchableOpacity,
-  Text, ActivityIndicator, StyleSheet, Button
+  View,
+  FlatList,
+  TouchableOpacity,
+  Text,
+  ActivityIndicator,
+  StyleSheet,
 } from 'react-native';
 import axios from 'axios';
-import { UserContext } from './UserContext';
+import { useFocusEffect } from '@react-navigation/native';
 import { API_BASE } from './config';
+import { UserContext } from './UserContext';
 
 export default function UserList({ navigation }) {
+  const { user, setUser } = useContext(UserContext);
   const [users, setUsers] = useState(null);
-  const { setUser }       = useContext(UserContext);
 
-  useLayoutEffect(() => {
-    navigation.setOptions({
-      title: 'Select User',
-      headerRight: () => (
-        <Button title="New" onPress={() => navigation.navigate('AddUser')} />
-      ),
-    });
-  }, [navigation]);
-
-  useEffect(() => {
-    axios.get(`${API_BASE}/api/users`)
-      .then(r => setUsers(r.data))
-      .catch(console.error);
-  }, []);
+  // Reload the user list any time this screen comes into focus
+  useFocusEffect(
+    React.useCallback(() => {
+      setUsers(null);
+      axios
+        .get(`${API_BASE}/api/users`)
+        .then(res => setUsers(res.data))
+        .catch(err => {
+          console.error(err);
+          setUsers([]);
+        });
+    }, [])
+  );
 
   if (users === null) {
     return (
@@ -38,30 +42,50 @@ export default function UserList({ navigation }) {
   return (
     <FlatList
       data={users}
-      keyExtractor={u => u.id}
+      keyExtractor={item => item.id}
+      contentContainerStyle={styles.list}
+      renderItem={({ item }) => {
+        const isSelected = user?.id === item.id;
+        return (
+          <TouchableOpacity
+            style={[styles.item, isSelected && styles.selected]}
+            onPress={() => {
+              setUser(item);
+              // Switch to the Runs tab (RunsTab in App.js)
+              navigation.getParent()?.navigate('RunsTab');
+            }}
+          >
+            <Text style={styles.name}>{item.name}</Text>
+          </TouchableOpacity>
+        );
+      }}
       ListEmptyComponent={() => (
-        <Text style={styles.empty}>No users—please create one.</Text>
-      )}
-      renderItem={({ item }) => (
-        <TouchableOpacity
-          style={styles.item}
-          onPress={() => {
-            setUser(item);
-            navigation.navigate('Runs'); // go to Runs tab
-          }}
-        >
-          <Text style={styles.name}>{item.name}</Text>
-          {item.email && <Text style={styles.email}>{item.email}</Text>}
-        </TouchableOpacity>
+        <View style={styles.center}>
+          <Text>No users found.</Text>
+        </View>
       )}
     />
   );
 }
 
 const styles = StyleSheet.create({
-  center: { flex:1,justifyContent:'center',alignItems:'center' },
-  empty:  { textAlign:'center',marginTop:32,color:'#666' },
-  item:   { padding:16,borderBottomWidth:1,borderColor:'#EEE' },
-  name:   { fontSize:16,fontWeight:'bold' },
-  email:  { color:'#666',marginTop:4 },
+  center: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  list: {
+    paddingVertical: 8,
+  },
+  item: {
+    padding: 16,
+    borderBottomWidth: 1,
+    borderColor: '#EEE',
+  },
+  selected: {
+    backgroundColor: '#E6F0FF',
+  },
+  name: {
+    fontSize: 16,
+  },
 });

@@ -1,7 +1,6 @@
 // VehicleList.js
 import React, {
   useState,
-  useEffect,
   useContext,
   useLayoutEffect,
 } from 'react';
@@ -15,6 +14,7 @@ import {
   Button,
   Alert,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import axios from 'axios';
 import { API_BASE } from './config';
 import { UserContext } from './UserContext';
@@ -23,35 +23,34 @@ export default function VehicleList({ navigation }) {
   const { user } = useContext(UserContext);
   const [vehicles, setVehicles] = useState(null);
 
-  // Configure header: title + “New” button
+  // Header button
   useLayoutEffect(() => {
     navigation.setOptions({
       title: 'My Vehicles',
       headerRight: () => (
-        <Button
-          title="New"
-          onPress={() => navigation.navigate('AddVehicle')}
-        />
+        <Button title="New" onPress={() => navigation.navigate('AddVehicle')} />
       ),
     });
   }, [navigation]);
 
-  // Fetch only this user’s vehicles whenever user changes
-  useEffect(() => {
-    if (!user) {
-      setVehicles([]);  // no user → treat as empty
-      return;
-    }
-    setVehicles(null); // trigger loading state
-    axios
-      .get(`${API_BASE}/api/vehicles?userId=${user.id}`)
-      .then(res => setVehicles(res.data))
-      .catch(err => {
-        console.error(err);
-        Alert.alert('Error', 'Could not fetch vehicles');
+  // Reload vehicles whenever this screen is focused or user changes
+  useFocusEffect(
+    React.useCallback(() => {
+      if (!user) {
         setVehicles([]);
-      });
-  }, [user]);
+        return;
+      }
+      setVehicles(null);
+      axios
+        .get(`${API_BASE}/api/vehicles?userId=${user.id}`)
+        .then(res => setVehicles(res.data))
+        .catch(err => {
+          console.error(err);
+          Alert.alert('Error', 'Could not fetch vehicles');
+          setVehicles([]);
+        });
+    }, [user])
+  );
 
   const deleteVehicle = id => {
     Alert.alert(
@@ -65,9 +64,7 @@ export default function VehicleList({ navigation }) {
           onPress: () => {
             axios
               .delete(`${API_BASE}/api/vehicles/${id}?userId=${user.id}`)
-              .then(() => {
-                setVehicles(vs => vs.filter(v => v.id !== id));
-              })
+              .then(() => setVehicles(vs => vs.filter(v => v.id !== id)))
               .catch(err => {
                 console.error(err);
                 Alert.alert(
@@ -81,18 +78,16 @@ export default function VehicleList({ navigation }) {
     );
   };
 
-  // No user selected
   if (!user) {
     return (
       <View style={styles.center}>
         <Text style={styles.message}>
-          Please select or create a user in the Profile tab.
+          Please select or create a user in Profile.
         </Text>
       </View>
     );
   }
 
-  // Still loading
   if (vehicles === null) {
     return (
       <View style={styles.center}>
@@ -101,20 +96,15 @@ export default function VehicleList({ navigation }) {
     );
   }
 
-  // No vehicles yet
   if (vehicles.length === 0) {
     return (
       <View style={styles.center}>
         <Text style={styles.message}>No vehicles yet.</Text>
-        <Button
-          title="Add one"
-          onPress={() => navigation.navigate('AddVehicle')}
-        />
+        <Button title="Add one" onPress={() => navigation.navigate('AddVehicle')} />
       </View>
     );
   }
 
-  // Render list
   return (
     <FlatList
       data={vehicles}
@@ -122,12 +112,7 @@ export default function VehicleList({ navigation }) {
       contentContainerStyle={styles.list}
       renderItem={({ item }) => (
         <View style={styles.row}>
-          <TouchableOpacity
-            style={styles.item}
-            onPress={() => {
-              /* could mark default vehicle here */
-            }}
-          >
+          <TouchableOpacity style={styles.item}>
             <Text style={styles.text}>
               {item.make} {item.model} ({item.year})
             </Text>
