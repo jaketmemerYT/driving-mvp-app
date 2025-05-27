@@ -13,6 +13,7 @@ import RunList     from './RunList';
 import AddRun      from './AddRun';
 import Tracker     from './Tracker';
 import RunDetail   from './RunDetail';
+import AddTrail   from './AddTrail';
 import TrailList   from './TrailList';
 import VehicleList from './VehicleList';
 import AddVehicle  from './AddVehicle';
@@ -70,11 +71,24 @@ function RunsStack() {
 
 function TrailsStack() {
   return (
-    <Stack.Navigator>
+    <Stack.Navigator initialRouteName="TrailList">
       <Stack.Screen
         name="TrailList"
         component={TrailList}
-        options={{ title: 'Trails' }}
+        options={({ navigation }) => ({
+          title: 'Trails',
+          headerRight: () => (
+            <Button
+              title="New Trail"
+              onPress={() => navigation.navigate('AddTrail')}
+            />
+          ),
+        })}
+      />
+      <Stack.Screen
+        name="AddTrail"
+        component={AddTrail}
+        options={{ title: 'New Trail' }}
       />
       <Stack.Screen
         name="Tracker"

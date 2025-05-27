@@ -8,6 +8,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   StyleSheet,
+  Button,
 } from 'react-native';
 import axios from 'axios';
 import { API_BASE } from './config';
@@ -20,9 +21,16 @@ export default function TrailList({ navigation }) {
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [filterCatIds, setFilterCatIds]   = useState([]);
 
-  // Header title
   useLayoutEffect(() => {
-    navigation.setOptions({ title: 'Trails' });
+    navigation.setOptions({
+      title: 'Trails',
+      headerRight: () => (
+        <Button
+          title="New Trail"
+          onPress={() => navigation.navigate('AddTrail')}
+        />
+      ),
+    });
   }, [navigation]);
 
   // Initial data fetch
