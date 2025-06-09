@@ -1,12 +1,18 @@
 // AddUser.js
-import React, { useState, useLayoutEffect } from 'react';
+import React, { useState, useContext, useLayoutEffect } from 'react';
 import {
-  View, TextInput, Button, Alert, StyleSheet
+  View,
+  TextInput,
+  Button,
+  Alert,
+  StyleSheet,
 } from 'react-native';
 import axios from 'axios';
 import { API_BASE } from './config';
+import { UserContext } from './UserContext';
 
 export default function AddUser({ navigation }) {
+  const { setUser } = useContext(UserContext);
   const [name, setName]   = useState('');
   const [email, setEmail] = useState('');
 
@@ -14,17 +20,24 @@ export default function AddUser({ navigation }) {
     navigation.setOptions({ title: 'New User' });
   }, [navigation]);
 
-  const submit = () => {
-    if (!name.trim()) return Alert.alert('Name is required');
-    axios.post(`${API_BASE}/api/users`, {
-      name:  name.trim(),
-      email: email.trim() || undefined,
-    })
-    .then(() => navigation.goBack())
-    .catch(err => {
+  const submit = async () => {
+    if (!name.trim()) {
+      return Alert.alert('Name required', 'Please enter your name.');
+    }
+    try {
+      const res = await axios.post(`${API_BASE}/api/users`, {
+        name:  name.trim(),
+        email: email.trim() || null,
+      });
+      setUser(res.data);
+      navigation.navigate('HomeTab');
+    } catch (err) {
       console.error(err);
-      Alert.alert('Error', err.response?.data?.error || err.message);
-    });
+      Alert.alert(
+        'Error creating profile',
+        err.response?.data?.error || err.message
+      );
+    }
   };
 
   return (
@@ -32,20 +45,31 @@ export default function AddUser({ navigation }) {
       <TextInput
         style={styles.input}
         placeholder="Name"
-        value={name} onChangeText={setName}
+        value={name}
+        onChangeText={setName}
+        autoFocus
       />
       <TextInput
         style={styles.input}
         placeholder="Email (optional)"
-        value={email} onChangeText={setEmail}
+        value={email}
+        onChangeText={setEmail}
         keyboardType="email-address"
       />
-      <Button title="Create User" onPress={submit} />
+      <Button title="Create Profile" onPress={submit} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container:{ flex:1,padding:16 },
-  input:    { borderWidth:1,borderColor:'#ccc',borderRadius:4,padding:8,marginBottom:16 }
+  container: {
+    flex: 1, padding: 16
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: '#CCC',
+    borderRadius: 4,
+    padding: 8,
+    marginBottom: 16,
+  },
 });
