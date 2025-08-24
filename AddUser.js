@@ -1,5 +1,5 @@
 // AddUser.js
-import React, { useState, useContext, useLayoutEffect } from 'react';
+import React, { useState, useContext } from 'react';
 import {
   View,
   TextInput,
@@ -8,21 +8,17 @@ import {
   StyleSheet,
 } from 'react-native';
 import axios from 'axios';
-import { API_BASE } from './config';
 import { UserContext } from './UserContext';
+import { API_BASE } from './config';
 
-export default function AddUser({ navigation }) {
+export default function AddUser() {
   const { setUser } = useContext(UserContext);
   const [name, setName]   = useState('');
   const [email, setEmail] = useState('');
 
-  useLayoutEffect(() => {
-    navigation.setOptions({ title: 'New User' });
-  }, [navigation]);
-
-  const submit = async () => {
+  const handleCreate = async () => {
     if (!name.trim()) {
-      return Alert.alert('Name required', 'Please enter your name.');
+      return Alert.alert('Error', 'Name is required.');
     }
     try {
       const res = await axios.post(`${API_BASE}/api/users`, {
@@ -30,11 +26,10 @@ export default function AddUser({ navigation }) {
         email: email.trim() || null,
       });
       setUser(res.data);
-      navigation.navigate('HomeTab');
+      // No navigation here—context change will switch to MainTabs automatically
     } catch (err) {
-      console.error(err);
       Alert.alert(
-        'Error creating profile',
+        'Creation failed',
         err.response?.data?.error || err.message
       );
     }
@@ -47,7 +42,7 @@ export default function AddUser({ navigation }) {
         placeholder="Name"
         value={name}
         onChangeText={setName}
-        autoFocus
+        autoCapitalize="words"
       />
       <TextInput
         style={styles.input}
@@ -55,21 +50,20 @@ export default function AddUser({ navigation }) {
         value={email}
         onChangeText={setEmail}
         keyboardType="email-address"
+        autoCapitalize="none"
       />
-      <Button title="Create Profile" onPress={submit} />
+      <Button title="Create Profile" onPress={handleCreate} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1, padding: 16
-  },
+  container: { flex:1, padding:16, justifyContent:'center' },
   input: {
     borderWidth: 1,
     borderColor: '#CCC',
     borderRadius: 4,
-    padding: 8,
+    padding: 12,
     marginBottom: 16,
   },
 });

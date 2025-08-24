@@ -1,103 +1,93 @@
 // UserList.js
-import React, { useState, useContext, useLayoutEffect } from 'react';
+import React, { useEffect, useState, useContext } from 'react';
 import {
   View,
-  Text,
   FlatList,
+  Text,
   TouchableOpacity,
-  StyleSheet,
   ActivityIndicator,
   Button,
+  StyleSheet,
 } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
 import axios from 'axios';
-import { API_BASE } from './config';
 import { UserContext } from './UserContext';
+import { API_BASE } from './config';
 
 export default function UserList({ navigation }) {
-  const { user, setUser } = useContext(UserContext);
-  const [users, setUsers]  = useState(null);
+  const { setUser } = useContext(UserContext);
+  const [users, setUsers] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  // Header: title + “New” button
-  useLayoutEffect(() => {
-    navigation.setOptions({
-      title: 'Select User',
-      headerRight: () => (
-        <Button
-          title="New"
-          onPress={() => navigation.navigate('AddUser')}
-        />
-      ),
-    });
-  }, [navigation]);
+  useEffect(() => {
+    let active = true;
+    axios
+      .get(`${API_BASE}/api/users`)
+      .then(res => {
+        if (!active) return;
+        setUsers(res.data);
+      })
+      .catch(console.error)
+      .finally(() => active && setLoading(false));
+    return () => { active = false; };
+  }, []);
 
-  // Reload list whenever this screen gains focus
-  useFocusEffect(
-    React.useCallback(() => {
-      setUsers(null);
-      axios
-        .get(`${API_BASE}/api/users`)
-        .then(res => setUsers(res.data))
-        .catch(console.error);
-    }, [])
-  );
-
-  if (users === null) {
+  if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" />
-      </View>
-    );
-  }
-
-  if (users.length === 0) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.message}>No profiles found.</Text>
-        <Button
-          title="Create Profile"
-          onPress={() => navigation.navigate('AddUser')}
-        />
+        <ActivityIndicator size="large"/>
       </View>
     );
   }
 
   return (
-    <FlatList
-      data={users}
-      keyExtractor={item => item.id}
-      renderItem={({ item }) => (
-        <TouchableOpacity
-          style={styles.item}
-          onPress={() => {
-            setUser(item);
-            navigation.navigate('HomeTab');
-          }}
-        >
-          <Text style={styles.name}>{item.name}</Text>
-          {item.email ? (
-            <Text style={styles.email}>{item.email}</Text>
-          ) : null}
-        </TouchableOpacity>
-      )}
-    />
+    <View style={styles.container}>
+      {/* Guest option */}
+      <Button
+        title="Continue as Guest"
+        onPress={() =>
+          setUser({ id: 'guest', name: 'Guest', email: null })
+        }
+      />
+
+      {/* Existing profiles */}
+      <FlatList
+        data={users}
+        keyExtractor={u => u.id}
+        ListHeaderComponent={<Text style={styles.header}>Select Profile</Text>}
+        renderItem={({ item }) => (
+          <TouchableOpacity
+            style={styles.item}
+            onPress={() => setUser(item)}
+          >
+            <Text style={styles.itemText}>{item.name}</Text>
+            {item.email ? (
+              <Text style={styles.subText}>{item.email}</Text>
+            ) : null}
+          </TouchableOpacity>
+        )}
+      />
+
+      {/* Create new profile */}
+      <View style={styles.footer}>
+        <Button
+          title="New Profile"
+          onPress={() => navigation.navigate('AddUser')}
+        />
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  center: {
-    flex: 1, justifyContent: 'center', alignItems: 'center'
+  container: { flex: 1, padding: 16 },
+  center:    { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  header:    { fontSize: 20, fontWeight: 'bold', marginBottom: 12 },
+  item:      {
+    padding:        12,
+    borderBottomWidth: 1,
+    borderColor:    '#EEE',
   },
-  message: {
-    marginBottom: 16, fontSize: 16, color: '#666'
-  },
-  item: {
-    padding: 16, borderBottomWidth: 1, borderColor: '#EEE'
-  },
-  name: {
-    fontSize: 18
-  },
-  email: {
-    marginTop: 4, color: '#666'
-  },
+  itemText:  { fontSize: 16 },
+  subText:   { color: '#666', marginTop: 4 },
+  footer:    { marginTop: 16 },
 });
