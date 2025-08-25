@@ -1,6 +1,5 @@
 // MapBase.js
-import React, { forwardRef, useMemo, useRef, useState, memo } from 'react';
-import { StyleSheet } from 'react-native';
+import React, { forwardRef, useMemo, useRef, useState } from 'react';
 import MapView, { UrlTile } from 'react-native-maps';
 import {
   USE_MAP_TILES,
@@ -12,22 +11,23 @@ import {
 } from './config';
 
 /**
- * Shared Map wrapper with robust fallbacks:
- * - Leaves platform base map visible (no shouldReplaceMapContent).
- * - If tiles error even once, auto-disables tiles for this instance (so users never stare at a blank map).
- * - Accepts `tilesEnabled={false}` for thumbnail/previews to keep them snappy and avoid any tile hiccups.
+ * Shared Map wrapper with robust fallbacks.
  *
- * Props you can pass through:
- * - tilesEnabled?: boolean (default true, but obeys USE_MAP_TILES and auto-fallback on errors)
- * - style?: ViewStyle (default fills parent via absoluteFillObject)
- * - children, initialRegion, region, onPress, etc. (same as MapView)
+ * Props:
+ * - tilesEnabled?: boolean (default true; obeys USE_MAP_TILES and auto-fallback on errors)
+ * - tileShouldReplace?: boolean (default false) — if true, UrlTile replaces base map
+ * - tileZIndex?: number (default -1)
+ * - style?: any (defaults to {flex:1})
+ * - ...rest are passed to MapView
  */
-const MapBaseInner = forwardRef(function MapBase(
-  { tilesEnabled = true, children, style, ...props },
+const MapBase = forwardRef(function MapBase(
+  { tilesEnabled = true, tileShouldReplace = false, tileZIndex = -1, style, children, ...props },
   ref
 ) {
   const [tilesOk, setTilesOk] = useState(true);
   const errorCountRef = useRef(0);
+
+  const mergedStyle = useMemo(() => [{ flex: 1 }, style], [style]);
 
   const canUseTiles = useMemo(() => {
     return (
@@ -42,10 +42,9 @@ const MapBaseInner = forwardRef(function MapBase(
 
   const urlTemplate = useMemo(() => {
     if (!canUseTiles) return null;
-    let u = MAPTILER_TILE_URL_TEMPLATE
+    return MAPTILER_TILE_URL_TEMPLATE
       .replace('{style}', MAPTILER_STYLE)
       .replace('{key}', MAPTILER_KEY);
-    return u;
   }, [canUseTiles]);
 
   const handleTileError = (e) => {
@@ -55,13 +54,14 @@ const MapBaseInner = forwardRef(function MapBase(
   };
 
   return (
-    <MapView ref={ref} style={[StyleSheet.absoluteFillObject, style]} {...props}>
+    <MapView ref={ref} style={mergedStyle} {...props}>
       {urlTemplate ? (
         <UrlTile
           urlTemplate={urlTemplate}
           maximumZ={MAPTILER_MAX_Z || 19}
           tileSize={MAPTILER_TILE_SIZE || 256}
-          zIndex={-1}
+          zIndex={tileZIndex}
+          shouldReplaceMapContent={tileShouldReplace}
           onError={handleTileError}
         />
       ) : null}
@@ -70,6 +70,4 @@ const MapBaseInner = forwardRef(function MapBase(
   );
 });
 
-// Memoize to avoid re-rendering the Map when parent re-renders with identical props
-const MapBase = memo(MapBaseInner);
 export default MapBase;
