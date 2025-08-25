@@ -4,334 +4,485 @@ import React, {
   useRef,
   useEffect,
   useLayoutEffect,
-  useContext
+  useContext,
 } from 'react';
 import {
   View,
+  Text,
   Alert,
   ActivityIndicator,
   StyleSheet,
-  Text,
   TouchableOpacity,
-  Button
+  Button,
 } from 'react-native';
-import MapView, { Polyline, Marker, Circle } from 'react-native-maps';
+import MapView, { Polyline, Marker, UrlTile } from 'react-native-maps';
 import * as Location from 'expo-location';
 import axios from 'axios';
 import { API_BASE } from './config';
 import { UserContext } from './UserContext';
 
-// Haversine formula: meters between two lat/long points
+/** Haversine distance (meters) */
 function distanceMeters(a, b) {
-  const toRad = d => (d * Math.PI) / 180;
+  const toRad = (d) => (d * Math.PI) / 180;
   const R = 6371000;
   const dLat = toRad(b.latitude - a.latitude);
   const dLon = toRad(b.longitude - a.longitude);
   const lat1 = toRad(a.latitude);
   const lat2 = toRad(b.latitude);
-  const sinDlat = Math.sin(dLat / 2);
-  const sinDlon = Math.sin(dLon / 2);
-  const sq =
-    sinDlat * sinDlat +
-    sinDlon * sinDlon * Math.cos(lat1) * Math.cos(lat2);
+  const sdLat = Math.sin(dLat / 2);
+  const sdLon = Math.sin(dLon / 2);
+  const sq = sdLat * sdLat + sdLon * sdLon * Math.cos(lat1) * Math.cos(lat2);
   return 2 * R * Math.asin(Math.sqrt(sq));
 }
 
+/** Distance from point P to segment AB (meters) */
+function pointToSegmentMeters(p, a, b) {
+  // convert to planar approximate via lat/long degrees -> rough meters using local scale
+  // For short segments, we can project in degrees with cosine latitude correction.
+  const latMeters = 111320; // ~ meters per degree latitude
+  const cosLat = Math.cos(((a.latitude + b.latitude) / 2) * (Math.PI / 180));
+  const lonMeters = 111320 * cosLat;
+
+  const ax = a.longitude * lonMeters;
+  const ay = a.latitude * latMeters;
+  const bx = b.longitude * lonMeters;
+  const by = b.latitude * latMeters;
+  const px = p.longitude * lonMeters;
+  const py = p.latitude * latMeters;
+
+  const abx = bx - ax;
+  const aby = by - ay;
+  const apx = px - ax;
+  const apy = py - ay;
+
+  const ab2 = abx * abx + aby * aby || 1e-9;
+  let t = (apx * abx + apy * aby) / ab2;
+  t = Math.max(0, Math.min(1, t));
+
+  const cx = ax + t * abx;
+  const cy = ay + t * aby;
+
+  const dx = px - cx;
+  const dy = py - cy;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/** Min distance from point to polyline (meters) */
+function minDistanceToPolylineMeters(p, polyline) {
+  if (!Array.isArray(polyline) || polyline.length === 0) return Infinity;
+  if (polyline.length === 1) return distanceMeters(p, polyline[0]);
+  let min = Infinity;
+  for (let i = 1; i < polyline.length; i++) {
+    const d = pointToSegmentMeters(p, polyline[i - 1], polyline[i]);
+    if (d < min) min = d;
+  }
+  return min;
+}
+
 export default function Tracker({ route, navigation }) {
-  const { user } = useContext(UserContext);
   const {
     trailId,
     trailName,
     startCoords,
     endCoords,
-    officialRoute
+    officialRoute = [],
   } = route.params;
 
-  // --- pull preferences with defaults ---
-  const prefs         = user.preferences || {};
-  const liveColor     = prefs.liveRouteColor     || 'blue';
-  const officialColor = prefs.officialRouteColor || 'black';
-  const warnColor1    = prefs.warningColor1      || 'orange';
-  const warnColor2    = prefs.warningColor2      || 'red';
-  const thresh1Feet   = prefs.warningThreshold1  || 50;
-  const thresh2Feet   = prefs.warningThreshold2  || 75;
-  const thresh1       = thresh1Feet * 0.3048;  // feet → meters
-  const thresh2       = thresh2Feet * 0.3048;
+  const { user, prefs } = useContext(UserContext);
 
-  // --- state & refs ---
+  // vehicles
   const [vehicles, setVehicles] = useState(null);
-  const [selectedVid, setVid]   = useState(null);
-  const [tracking, setTracking] = useState(false);
+  const [selectedVehicleId, setSelectedVehicleId] = useState(null);
 
-  const coordsRef    = useRef(startCoords ? [startCoords] : []);
-  const [coords, setCoords]     = useState(coordsRef.current);
-  const [region, setRegion]     = useState(
-    startCoords
-      ? { ...startCoords, latitudeDelta: 0.01, longitudeDelta: 0.01 }
-      : null
+  // tracking state
+  const [tracking, setTracking] = useState(false);
+  const [strokeColor, setStrokeColor] = useState(
+    prefs?.liveRouteColor || '#1976D2'
   );
 
-  const startTime     = useRef(null);
-  const watcher       = useRef(null);
-  const warned1Ref    = useRef(false);
-  const warned2Ref    = useRef(false);
-  const [deviation, setDeviation] = useState(0);
+  // coords
+  const coordsRef = useRef(startCoords ? [startCoords] : []);
+  const [coords, setCoords] = useState(coordsRef.current);
 
-  // --- load only this user's vehicles on focus ---
+  // map
+  const [region, setRegion] = useState(
+    startCoords
+      ? {
+          ...startCoords,
+          latitudeDelta: 0.01,
+          longitudeDelta: 0.01,
+        }
+      : null
+  );
+  const mapRef = useRef(null);
+
+  // timing + watcher
+  const startTimeRef = useRef(null);
+  const watchRef = useRef(null);
+  const abortedRef = useRef(false);
+
+  // thresholds (meters) + colors from prefs with safe defaults
+  const warnDist = (prefs?.warnDistanceFt ?? 50) * 0.3048;   // 50 ft
+  const alertDist = (prefs?.alertDistanceFt ?? 75) * 0.3048; // 75 ft
+  const failDist = (prefs?.offRouteFailFt ?? 100) * 0.3048;  // 100 ft
+
+  const liveColor = prefs?.liveRouteColor || '#1976D2';
+  const warnColor = prefs?.warnColor || '#FFA000';
+  const alertColor = prefs?.alertColor || '#D32F2F';
+  const officialColor = prefs?.officialRouteColor || '#000000';
+
+  // Load vehicles for this user on focus
   useEffect(() => {
     const unsub = navigation.addListener('focus', () => {
+      if (!user) {
+        setVehicles([]);
+        setSelectedVehicleId(null);
+        return;
+      }
       axios
-        .get(`${API_BASE}/api/vehicles`, { params: { userId: user.id } })
-        .then(r => setVehicles(r.data))
-        .catch(() => Alert.alert('Error','Could not load vehicles'));
+        .get(`${API_BASE}/api/vehicles?userId=${user.id}`)
+        .then((r) => {
+          setVehicles(r.data);
+          if (r.data.length === 1) setSelectedVehicleId(r.data[0].id);
+        })
+        .catch((e) => {
+          console.error('Vehicle load failed', e);
+          Alert.alert('Error', 'Could not load your vehicles.');
+        });
     });
     return unsub;
-  }, [navigation, user.id]);
+  }, [navigation, user]);
 
-  // --- finalize and upload ---
-  const finalizeRun = async () => {
-    watcher.current?.remove();
-    setTracking(false);
-
-    const runCoords = coordsRef.current.length
-      ? coordsRef.current
-      : [startCoords];
-
-    const duration = (Date.now() - startTime.current) / 1000;
-    const avgSpeed =
-      runCoords.reduce((sum, p) => sum + (p.speed || 0), 0)
-      / runCoords.length || 0;
-
-    try {
-      const res = await axios.post(`${API_BASE}/api/routes`, {
-        trailId,
-        coords:    runCoords,
-        duration,
-        avgSpeed,
-        vehicleId: selectedVid,
-        userId:    user.id,
-        groupId:   null
-      });
-      navigation.navigate('RunsTab', {
-        screen: 'RunDetail',
-        params: { run: res.data, trailName }
-      });
-    } catch (err) {
-      Alert.alert('Upload failed', err.response?.data?.error || err.message);
-    }
-
-    coordsRef.current = [];
-    setCoords([]);
-  };
-
-  // --- Stop: confirm if early, else finalize ---
-  const stopTracking = () => {
-    if (endCoords) {
-      const last = coordsRef.current[coordsRef.current.length - 1] || startCoords;
-      const dist = distanceMeters(last, endCoords);
-      if (dist > 6) {
-        return Alert.alert(
-          'Finish Early?',
-          `You're ${Math.round(dist)}m from the end. Finish now?`,
-          [
-            { text:'Cancel' },
-            { text:'Finish', onPress: finalizeRun }
-          ]
-        );
-      }
-    }
-    finalizeRun();
-  };
-
-  // --- Start: seed & watch position ---
-  const startTracking = async () => {
-    if (!selectedVid) {
-      return Alert.alert('Select a vehicle first');
-    }
-    const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      return Alert.alert('Permission denied','Allow location');
-    }
-
-    const loc = await Location.getCurrentPositionAsync({
-      accuracy: Location.Accuracy.High
-    });
-    const pt = {
-      latitude:  loc.coords.latitude,
-      longitude: loc.coords.longitude,
-      speed:     loc.coords.speed    || 0,
-      heading:   loc.coords.heading  || 0,
-      altitude:  loc.coords.altitude || 0,
-      accuracy:  loc.coords.accuracy || 0,
-      timestamp: loc.timestamp
-    };
-    coordsRef.current = [pt];
-    setCoords([pt]);
-    setRegion({
-      latitude:       pt.latitude,
-      longitude:      pt.longitude,
-      latitudeDelta:  0.01,
-      longitudeDelta: 0.01
-    });
-
-    startTime.current = Date.now();
-    setTracking(true);
-
-    watcher.current = await Location.watchPositionAsync(
-      { accuracy: Location.Accuracy.High, distanceInterval: 1 },
-      locUpdate => {
-        const newPt = {
-          latitude:  locUpdate.coords.latitude,
-          longitude: locUpdate.coords.longitude,
-          speed:     locUpdate.coords.speed    || 0,
-          heading:   locUpdate.coords.heading  || 0,
-          altitude:  locUpdate.coords.altitude || 0,
-          accuracy:  locUpdate.coords.accuracy || 0,
-          timestamp: locUpdate.timestamp
-        };
-        coordsRef.current.push(newPt);
-        setCoords([...coordsRef.current]);
-
-        // recenter map
-        setRegion(r => ({
-          ...r,
-          latitude:  newPt.latitude,
-          longitude: newPt.longitude
-        }));
-
-        // compute deviation (nearest distance to officialRoute)
-        if (officialRoute?.length) {
-          const dist = Math.min(
-            ...officialRoute.map(p => distanceMeters(newPt, p))
-          );
-          setDeviation(dist);
-
-          // two-phase alert
-          if (dist > thresh2 && !warned2Ref.current) {
-            warned2Ref.current = true;
-            Alert.alert(
-              'Off Course',
-              `You've strayed ${Math.round(dist)}m from the route!`
-            );
-          } else if (dist > thresh1 && !warned1Ref.current) {
-            warned1Ref.current = true;
-            Alert.alert(
-              'Warning',
-              `You're ${Math.round(dist)}m off the official route.`
-            );
-          }
-        }
-
-        // auto-stop when near endpoint
-        if (endCoords && distanceMeters(newPt, endCoords) < 6) {
-          stopTracking();
-        }
-      }
-    );
-  };
-
-  // --- header Start/Stop button ---
+  // header
   useLayoutEffect(() => {
     navigation.setOptions({
-      title: trailName,
+      title: trailName || 'Tracker',
       headerRight: () => (
         <Button
           title={tracking ? 'Stop' : 'Start'}
           onPress={tracking ? stopTracking : startTracking}
-          disabled={!selectedVid}
+          disabled={!selectedVehicleId || !user}
         />
-      )
+      ),
     });
-  }, [navigation, tracking, selectedVid]);
+  }, [navigation, tracking, selectedVehicleId, user]);
 
-  // --- render phases ---
-  if (vehicles === null) {
+  // Ensure we have an initial region even if startCoords missing
+  useEffect(() => {
+    let done = false;
+    (async () => {
+      if (region) return;
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') return;
+        const loc = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.High,
+        });
+        if (!done) {
+          const seed = {
+            latitude: loc.coords.latitude,
+            longitude: loc.coords.longitude,
+          };
+          if (coordsRef.current.length === 0) {
+            coordsRef.current = [seed];
+            setCoords([...coordsRef.current]);
+          }
+          setRegion({
+            ...seed,
+            latitudeDelta: 0.01,
+            longitudeDelta: 0.01,
+          });
+        }
+      } catch (e) {
+        console.error('Initial region failed', e);
+      }
+    })();
+    return () => {
+      done = true;
+    };
+  }, [region]);
+
+  // ——————— Start Tracking ———————
+  const startTracking = async () => {
+    if (!user) return Alert.alert('Profile', 'Please select a user first.');
+    if (!selectedVehicleId)
+      return Alert.alert('Vehicle', 'Please select a vehicle.');
+
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        return Alert.alert('Permission needed', 'Allow location to track.');
+      }
+
+      // seed initial point from GPS (full object)
+      const initial = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.High,
+      });
+      const seed = {
+        latitude: initial.coords.latitude,
+        longitude: initial.coords.longitude,
+        speed: initial.coords.speed ?? 0,
+        heading: initial.coords.heading ?? 0,
+        altitude: initial.coords.altitude ?? 0,
+        accuracy: initial.coords.accuracy ?? 0,
+        timestamp: Date.now(),
+      };
+      coordsRef.current = [seed];
+      setCoords([...coordsRef.current]);
+
+      // center map
+      setRegion((r) => ({
+        latitude: seed.latitude,
+        longitude: seed.longitude,
+        latitudeDelta: r?.latitudeDelta ?? 0.01,
+        longitudeDelta: r?.longitudeDelta ?? 0.01,
+      }));
+
+      setStrokeColor(liveColor);
+      abortedRef.current = false;
+      startTimeRef.current = Date.now();
+      setTracking(true);
+
+      // subscribe
+      try {
+        watchRef.current?.remove?.();
+      } catch {}
+      watchRef.current = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.High,
+          distanceInterval: 1,
+          timeInterval: 1000,
+        },
+        (loc) => {
+          // append point (deep copy to avoid "cannot add property" issues)
+          const pt = {
+            latitude: loc.coords.latitude,
+            longitude: loc.coords.longitude,
+            speed: loc.coords.speed ?? 0,
+            heading: loc.coords.heading ?? 0,
+            altitude: loc.coords.altitude ?? 0,
+            accuracy: loc.coords.accuracy ?? 0,
+            timestamp: Date.now(),
+          };
+          coordsRef.current.push(pt);
+          setCoords([...coordsRef.current]);
+
+          // animate map
+          mapRef.current?.animateToRegion({
+            latitude: pt.latitude,
+            longitude: pt.longitude,
+            latitudeDelta: region?.latitudeDelta ?? 0.01,
+            longitudeDelta: region?.longitudeDelta ?? 0.01,
+          });
+
+          // deviation logic (only if officialRoute provided)
+          if (officialRoute && officialRoute.length >= 2) {
+            const d = minDistanceToPolylineMeters(pt, officialRoute);
+            if (d > failDist && !abortedRef.current) {
+              abortedRef.current = true;
+              setStrokeColor(alertColor);
+              Alert.alert(
+                'Off course',
+                'You have strayed more than the allowed distance. This run is invalid.'
+              );
+              // stop without upload
+              safeStopWatcher();
+              setTracking(false);
+              return;
+            } else if (d > alertDist) {
+              setStrokeColor(alertColor);
+            } else if (d > warnDist) {
+              setStrokeColor(warnColor);
+            } else {
+              setStrokeColor(liveColor);
+            }
+          }
+
+          // auto-stop if near end
+          if (endCoords) {
+            const endRadius = (prefs?.arriveRadiusMeters ?? 6); // ~20ft
+            const toEnd = distanceMeters(pt, endCoords);
+            if (toEnd <= endRadius) {
+              stopTracking(); // will upload
+            }
+          }
+        }
+      );
+    } catch (err) {
+      console.error('startTracking error', err);
+      Alert.alert('Error', err.message || 'Could not start tracking');
+    }
+  };
+
+  // ——————— Stop Tracking ———————
+  const safeStopWatcher = () => {
+    try {
+      watchRef.current?.remove?.();
+    } catch {}
+    watchRef.current = null;
+  };
+
+  const stopTracking = async () => {
+    safeStopWatcher();
+    setTracking(false);
+
+    if (abortedRef.current) {
+      // already shown an alert; do not upload, just reset
+      coordsRef.current = [];
+      setCoords([]);
+      setStrokeColor(liveColor);
+      return;
+    }
+
+    const runCoords = coordsRef.current;
+    if (!runCoords.length) {
+      Alert.alert('No data', 'No GPS points were recorded.');
+      return;
+    }
+
+    const duration = (Date.now() - (startTimeRef.current || Date.now())) / 1000;
+    const avgSpeed =
+      runCoords.reduce((sum, p) => sum + (p.speed || 0), 0) / runCoords.length || 0;
+
+    try {
+      const payload = {
+        trailId,
+        coords: runCoords,
+        duration,
+        avgSpeed,
+        vehicleId: selectedVehicleId,
+        userId: user.id,
+        groupId: null,
+      };
+      const res = await axios.post(`${API_BASE}/api/routes`, payload);
+
+      // navigate to RunDetail (replace)
+      navigation.replace('RunDetail', {
+        run: res.data,
+        trailName: trailName || 'Trail',
+      });
+    } catch (err) {
+      console.error('Upload failed', err);
+      Alert.alert(
+        'Upload failed',
+        err.response?.data?.error || err.message || 'Unknown error'
+      );
+    } finally {
+      // reset buffer for next time
+      coordsRef.current = [];
+      setCoords([]);
+      setStrokeColor(liveColor);
+    }
+  };
+
+  // cleanup on unmount
+  useEffect(() => {
+    return () => {
+      safeStopWatcher();
+    };
+  }, []);
+
+  // ——————— UI ———————
+  // vehicles loading
+  if (vehicles === null || !region) {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" />
+        {!user && <Text style={styles.dim}>Select a profile first…</Text>}
       </View>
     );
   }
 
+  // no vehicles for this user
   if (!tracking && vehicles.length === 0) {
     return (
       <View style={styles.center}>
+        <Text style={styles.dim}>You have no vehicles yet.</Text>
         <Button
           title="Add a Vehicle"
-          onPress={() => navigation.navigate('AddVehicle')}
+          onPress={() => navigation.navigate('VehicleList')}
         />
       </View>
     );
   }
 
-  if (!tracking) {
+  // vehicle picker before tracking (only if user has multiple)
+  if (!tracking && vehicles.length > 1 && !selectedVehicleId) {
     return (
       <View style={styles.container}>
         <Text style={styles.subheader}>Select Your Vehicle</Text>
-        {vehicles.map(v => (
+        {vehicles.map((v) => (
           <TouchableOpacity
             key={v.id}
             style={[
               styles.vehicleItem,
-              v.id === selectedVid && styles.selectedVehicle
+              v.id === selectedVehicleId && styles.selectedVehicle,
             ]}
-            onPress={() => setVid(v.id)}
+            onPress={() => setSelectedVehicleId(v.id)}
           >
             <Text>{`${v.make} ${v.model} (${v.year})`}</Text>
           </TouchableOpacity>
         ))}
+        <View style={{ padding: 12 }}>
+          <Button
+            title="Start"
+            onPress={startTracking}
+            disabled={!selectedVehicleId}
+          />
+        </View>
       </View>
     );
   }
 
-  // compute dynamic live polyline color
-  const liveStroke = deviation > thresh2
-    ? warnColor2
-    : deviation > thresh1
-      ? warnColor1
-      : liveColor;
-
+  // main map (tracking OR user has exactly one vehicle already selected)
   return (
-    <MapView style={styles.map} region={region}>
-      {/* official route in user’s chosen color */}
-      {officialRoute?.length > 1 && (
+    <MapView ref={mapRef} style={styles.map} initialRegion={region}>
+      {/* OSM base tiles for visible background */}
+      <UrlTile
+        urlTemplate="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        maximumZ={19}
+        shouldReplaceMapContent
+      />
+
+      {/* official route always visible if passed in */}
+      {officialRoute && officialRoute.length > 1 && (
         <Polyline
-          coordinates={officialRoute}
+          coordinates={officialRoute.map((p) => ({
+            latitude: p.latitude,
+            longitude: p.longitude,
+          }))}
           strokeWidth={4}
           strokeColor={officialColor}
         />
       )}
-      {/* live route, dynamically colored */}
-      {coords.length > 1 && (
-        <Polyline
-          coordinates={coords}
-          strokeWidth={4}
-          strokeColor={liveStroke}
-        />
-      )}
-      {coords[0] && <Marker coordinate={coords[0]} title="Start" />}
+
+      {/* live route */}
       {coords.length > 0 && (
-        <Marker coordinate={coords[coords.length - 1]} title="You" />
+        <>
+          <Polyline coordinates={coords} strokeWidth={5} strokeColor={strokeColor} />
+          <Marker coordinate={coords[0]} title="Start" />
+          <Marker coordinate={coords[coords.length - 1]} title="Current" />
+        </>
       )}
-      {endCoords && <Circle center={endCoords} radius={6} />}
     </MapView>
   );
 }
 
 const styles = StyleSheet.create({
-  container:       { flex: 1, padding: 16 },
-  center:          { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  map:             { flex: 1 },
-  subheader:       { marginBottom: 8, fontWeight: '500' },
-  vehicleItem:     {
-    padding:     12,
+  container: { flex: 1, padding: 16 },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  map: { flex: 1 },
+  subheader: { marginBottom: 8, fontWeight: '600' },
+  vehicleItem: {
+    padding: 12,
     borderWidth: 1,
     borderColor: '#ccc',
-    borderRadius: 4,
-    marginBottom: 8
+    borderRadius: 6,
+    marginBottom: 8,
   },
-  selectedVehicle:{
+  selectedVehicle: {
     borderColor: '#007AFF',
-    backgroundColor: '#E6F0FF'
-  }
+    backgroundColor: '#E6F0FF',
+  },
+  dim: { color: '#666', marginTop: 8, textAlign: 'center' },
 });
