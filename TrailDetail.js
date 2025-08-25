@@ -4,9 +4,11 @@ import { View, Alert, Button, ActivityIndicator, StyleSheet, Text } from 'react-
 import { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import axios from 'axios';
+
 import MapBase from './MapBase';
 import { API_BASE } from './config';
 import { UserContext } from './UserContext';
+import { useFitToGeometry } from './hooks/useFitToGeometry';
 
 // Haversine (meters)
 function distanceMeters(a, b) {
@@ -29,7 +31,9 @@ export default function TrailDetail({ route, navigation }) {
   const [trail, setTrail] = useState(null);
   const [loading, setLoading] = useState(true);
   const [arrived, setArrived] = useState(false);
+  const [mapReady, setMapReady] = useState(false);
   const watcher = useRef(null);
+  const mapRef = useRef(null);
 
   const officialColor = prefs?.officialRouteColor || '#000000';
 
@@ -87,7 +91,25 @@ export default function TrailDetail({ route, navigation }) {
     };
   }, [trail?.coords, arrived]);
 
-  if (loading || !trail?.coords) {
+  // ---- Compute geometry safely for ALL renders (so hooks stay in fixed order)
+  const startCoords = trail?.coords ?? null;
+  const endCoords   = trail?.endCoords ?? null;
+  const officialRoute = Array.isArray(trail?.route) ? trail.route : [];
+
+  // Standardized auto-fit (always called; gated by `enabled`)
+  useFitToGeometry({
+    mapRef,
+    route: officialRoute,
+    start: startCoords,
+    end: endCoords,
+    padding: { top: 60, right: 60, bottom: 60, left: 60 },
+    animated: true,
+    minSpan: 0.0005,
+    debounceMs: 0,
+    enabled: mapReady && !!startCoords, // only tries to fit when map + data are ready
+  });
+
+  if (loading || !startCoords) {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" />
@@ -95,36 +117,38 @@ export default function TrailDetail({ route, navigation }) {
     );
   }
 
-  const { coords: startCoords, endCoords, route: officialRoute = [] } = trail;
-
   return (
     <View style={styles.container}>
-      <MapBase
-        initialRegion={{
-          latitude: startCoords.latitude,
-          longitude: startCoords.longitude,
-          latitudeDelta: 0.01,
-          longitudeDelta: 0.01,
-        }}
-      >
-        <Marker coordinate={startCoords} title={trail.name} />
-        {endCoords && <Marker coordinate={endCoords} title="Trail End" pinColor="green" />}
+      <View style={styles.mapWrap}>
+        <MapBase
+          ref={mapRef}
+          initialRegion={{
+            latitude: startCoords.latitude,
+            longitude: startCoords.longitude,
+            latitudeDelta: 0.01,
+            longitudeDelta: 0.01,
+          }}
+          onMapReady={() => setMapReady(true)}
+        >
+          <Marker coordinate={startCoords} title={trail.name} />
+          {endCoords && <Marker coordinate={endCoords} title="Trail End" pinColor="green" />}
 
-        {officialRoute.length > 1 && (
-          <Polyline
-            coordinates={officialRoute.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
-            strokeWidth={4}
-            strokeColor={officialColor}
-          />
-        )}
-      </MapBase>
+          {officialRoute.length > 1 && (
+            <Polyline
+              coordinates={officialRoute.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
+              strokeWidth={4}
+              strokeColor={officialColor}
+            />
+          )}
+        </MapBase>
+      </View>
 
       <View style={styles.footer}>
         {!arrived ? (
           <Button
             title="Navigate to Trailhead"
             onPress={() => {
-              // Hook up to maps deeplink if desired
+              // TODO: deeplink into Apple/Google Maps with startCoords
             }}
           />
         ) : (
@@ -150,8 +174,9 @@ export default function TrailDetail({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
+  container: { flex: 1, backgroundColor: '#FFF' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  mapWrap: { flex: 1 },
   footer: { padding: 12, gap: 8 },
   meta: { color: '#666', textAlign: 'center' },
 });

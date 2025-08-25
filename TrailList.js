@@ -1,5 +1,5 @@
 // TrailList.js
-import React, { useEffect, useState, useContext, useCallback } from 'react';
+import React, { useEffect, useState, useContext, useCallback, useRef, memo } from 'react';
 import {
   View,
   Text,
@@ -9,13 +9,16 @@ import {
   FlatList,
   ScrollView,
   Button,
+  Platform,
 } from 'react-native';
 import { Marker, Polyline } from 'react-native-maps';
 import axios from 'axios';
 import { useFocusEffect } from '@react-navigation/native';
+
 import MapBase from './MapBase';
 import { API_BASE } from './config';
 import { UserContext } from './UserContext';
+import { useFitToGeometry } from './hooks/useFitToGeometry';
 
 export default function TrailList({ navigation }) {
   const { prefs } = useContext(UserContext);
@@ -26,8 +29,6 @@ export default function TrailList({ navigation }) {
   const [filterCatIds, setFilterCatIds] = useState([]);
 
   const officialColor = prefs?.officialRouteColor || '#000000';
-
-  // Header: New Trail button is set in App.js via options, so no need to setOptions here.
 
   // Load data on focus so lists refresh after adds
   useFocusEffect(
@@ -115,26 +116,32 @@ export default function TrailList({ navigation }) {
           data={visibleTrails}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => {
-            const start = item.coords;
-            const end = item.endCoords;
+            const start = item.coords || null;
+            const end = item.endCoords || null;
             const route = Array.isArray(item.route) ? item.route : [];
 
-            // Choose a reasonable preview region
-            const previewRegion = start
-              ? {
-                  latitude: start.latitude,
-                  longitude: start.longitude,
-                  latitudeDelta: 0.02,
-                  longitudeDelta: 0.02,
-                }
-              : route.length > 0
-              ? {
-                  latitude: route[0].latitude,
-                  longitude: route[0].longitude,
-                  latitudeDelta: 0.02,
-                  longitudeDelta: 0.02,
-                }
-              : null;
+            // Provide a stable initialRegion so the map has something to show before first fit
+            const previewRegion =
+              start
+                ? {
+                    latitude: start.latitude,
+                    longitude: start.longitude,
+                    latitudeDelta: 0.02,
+                    longitudeDelta: 0.02,
+                  }
+                : route.length > 0
+                ? {
+                    latitude: route[0].latitude,
+                    longitude: route[0].longitude,
+                    latitudeDelta: 0.02,
+                    longitudeDelta: 0.02,
+                  }
+                : {
+                    latitude: 0,
+                    longitude: 0,
+                    latitudeDelta: 60,
+                    longitudeDelta: 60,
+                  };
 
             const catIds = trailCatsMap[item.id] || [];
 
@@ -164,29 +171,14 @@ export default function TrailList({ navigation }) {
                   })}
                 </View>
 
-                {/* Scaled map preview with tiles, markers & official route */}
-                {previewRegion && (
-                  <View style={styles.previewWrap}>
-                    <MapBase
-                      initialRegion={previewRegion}
-                      showTiles={true}
-                      scrollEnabled={false}
-                      zoomEnabled={false}
-                      rotateEnabled={false}
-                      pitchEnabled={false}
-                    >
-                      {start && <Marker coordinate={start} title="Trailhead" />}
-                      {end && <Marker coordinate={end} title="End" pinColor="green" />}
-                      {route.length > 1 && (
-                        <Polyline
-                          coordinates={route.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
-                          strokeWidth={3}
-                          strokeColor={officialColor}
-                        />
-                      )}
-                    </MapBase>
-                  </View>
-                )}
+                {/* Scaled map preview (with Android-lite + half padding) */}
+                <TrailCardMap
+                  previewRegion={previewRegion}
+                  start={start}
+                  end={end}
+                  route={route}
+                  officialColor={officialColor}
+                />
 
                 <Text style={styles.dimSmall}>
                   {route.length} points • {new Date().toLocaleDateString()}
@@ -199,6 +191,53 @@ export default function TrailList({ navigation }) {
     </View>
   );
 }
+
+const TrailCardMap = memo(function TrailCardMap({ previewRegion, start, end, route, officialColor }) {
+  const mapRef = useRef(null);
+  const [mapReady, setMapReady] = useState(false);
+
+  // Auto-fit thumbnails with HALF padding = 12
+  useFitToGeometry({
+    mapRef,
+    route,
+    start,
+    end,
+    padding: 12,
+    animated: false,
+    minSpan: 0.0005,
+    debounceMs: 0,
+    enabled: mapReady,
+  });
+
+  return (
+    <View style={styles.previewWrap}>
+      <MapBase
+        ref={mapRef}
+        initialRegion={previewRegion}
+        tilesEnabled={false}
+        cacheEnabled
+        liteMode={Platform.OS === 'android'}
+        scrollEnabled={false}
+        zoomEnabled={false}
+        rotateEnabled={false}
+        pitchEnabled={false}
+        onMapReady={() => setMapReady(true)}
+        pointerEvents="none"
+        style={styles.previewMap}
+      >
+        {start && <Marker coordinate={start} title="Trailhead" />}
+        {end && <Marker coordinate={end} title="End" pinColor="green" />}
+        {route.length > 1 && (
+          <Polyline
+            coordinates={route.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
+            strokeWidth={3}
+            strokeColor={officialColor}
+          />
+        )}
+      </MapBase>
+    </View>
+  );
+});
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
@@ -240,5 +279,6 @@ const styles = StyleSheet.create({
   },
   badgeText: { fontSize: 12, color: '#333' },
 
-  previewWrap: { height: 130, borderRadius: 10, overflow: 'hidden', marginTop: 8 },
+  previewWrap: { height: 130, marginTop: 8, borderRadius: 10 },
+  previewMap: { ...StyleSheet.absoluteFillObject, borderRadius: 10, overflow: 'hidden' },
 });

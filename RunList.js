@@ -1,5 +1,12 @@
 // RunList.js
-import React, { useState, useLayoutEffect, useContext, useCallback } from 'react';
+import React, {
+  useState,
+  useLayoutEffect,
+  useContext,
+  useCallback,
+  useRef,
+  memo,
+} from 'react';
 import {
   View,
   Text,
@@ -9,13 +16,16 @@ import {
   ActivityIndicator,
   StyleSheet,
   Button,
+  Platform,
 } from 'react-native';
 import { Polyline, Marker } from 'react-native-maps';
 import axios from 'axios';
 import { useFocusEffect } from '@react-navigation/native';
+
 import MapBase from './MapBase';
 import { API_BASE } from './config';
 import { UserContext } from './UserContext';
+import { useFitToGeometry } from './hooks/useFitToGeometry';
 
 export default function RunList({ navigation }) {
   const { user, prefs } = useContext(UserContext);
@@ -114,7 +124,12 @@ export default function RunList({ navigation }) {
   return (
     <View style={styles.container}>
       {/* Group chips */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll} contentContainerStyle={styles.chipContainer}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.chipScroll}
+        contentContainerStyle={styles.chipContainer}
+      >
         {groups.map((g) => {
           const sel = selectedGroup?.id === g.id;
           return (
@@ -133,7 +148,12 @@ export default function RunList({ navigation }) {
       </ScrollView>
 
       {/* Category chips */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll} contentContainerStyle={styles.chipContainer}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.chipScroll}
+        contentContainerStyle={styles.chipContainer}
+      >
         {categories.map((cat) => {
           const sel = filterCatIds.includes(cat.id);
           return (
@@ -158,61 +178,16 @@ export default function RunList({ navigation }) {
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => {
             const trailName = trailsMap[item.trailId] || 'Trail';
-            const coords = item.coords || [];
-            const previewRegion =
-              coords.length > 0
-                ? {
-                    latitude: coords[0].latitude,
-                    longitude: coords[0].longitude,
-                    latitudeDelta: 0.02,
-                    longitudeDelta: 0.02,
-                  }
-                : null;
             const tCats = trailCatsMap[item.trailId] || [];
-
             return (
-              <TouchableOpacity
-                style={styles.item}
+              <RunCard
+                item={item}
+                trailName={trailName}
+                tCats={tCats}
+                categories={categories}
+                liveColor={liveColor}
                 onPress={() => navigation.navigate('RunDetail', { run: item, trailName })}
-              >
-                <Text style={styles.title}>{trailName}</Text>
-
-                <View style={styles.badgesRow}>
-                  {tCats.map((cid) => (
-                    <View style={styles.badge} key={cid}>
-                      <Text style={styles.badgeText}>{categories.find((c) => c.id === cid)?.name}</Text>
-                    </View>
-                  ))}
-                </View>
-
-                {previewRegion && (
-                  <View style={styles.previewWrap}>
-                    <MapBase
-                      initialRegion={previewRegion}
-                      showTiles={true}
-                      // lighter previews—turn off gestures for performance
-                      scrollEnabled={false}
-                      zoomEnabled={false}
-                      rotateEnabled={false}
-                      pitchEnabled={false}
-                    >
-                      {/* Start marker for context */}
-                      <Marker coordinate={{ latitude: coords[0].latitude, longitude: coords[0].longitude }} />
-                      {coords.length > 1 && (
-                        <Polyline
-                          coordinates={coords.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
-                          strokeWidth={2}
-                          strokeColor={liveColor}
-                        />
-                      )}
-                    </MapBase>
-                  </View>
-                )}
-
-                <Text style={styles.subtitle}>
-                  {new Date(item.timestamp).toLocaleString()} • {Math.round(item.duration)}s
-                </Text>
-              </TouchableOpacity>
+              />
             );
           }}
         />
@@ -221,10 +196,94 @@ export default function RunList({ navigation }) {
   );
 }
 
+/** Memoized card with its own Map ref + gated auto-fit */
+const RunCard = memo(function RunCard({ item, trailName, tCats, categories, liveColor, onPress }) {
+  const mapRef = useRef(null);
+  const [mapReady, setMapReady] = useState(false);
+
+  const coords = Array.isArray(item.coords) ? item.coords : [];
+  const hasRoute = coords.length > 1;
+
+  // Initial region so there's *something* to render before fit
+  const previewRegion = coords.length
+    ? {
+        latitude: coords[0].latitude,
+        longitude: coords[0].longitude,
+        latitudeDelta: 0.02,
+        longitudeDelta: 0.02,
+      }
+    : {
+        latitude: 0,
+        longitude: 0,
+        latitudeDelta: 60,
+        longitudeDelta: 60,
+      };
+
+  // Auto-fit to the run geometry once map is ready (HALF padding = 12)
+  useFitToGeometry({
+    mapRef,
+    route: coords,
+    start: coords[0] || null,
+    end: coords[coords.length - 1] || null,
+    padding: 12,
+    animated: false,   // thumbnails snap instantly
+    minSpan: 0.0005,
+    debounceMs: 0,
+    enabled: mapReady,
+  });
+
+  return (
+    <TouchableOpacity style={styles.item} onPress={onPress} activeOpacity={0.85}>
+      <Text style={styles.title}>{trailName}</Text>
+
+      <View style={styles.badgesRow}>
+        {tCats.map((cid) => (
+          <View style={styles.badge} key={cid}>
+            <Text style={styles.badgeText}>{categories.find((c) => c.id === cid)?.name}</Text>
+          </View>
+        ))}
+      </View>
+
+      <View style={styles.previewWrap}>
+        <MapBase
+          ref={mapRef}
+          initialRegion={previewRegion}
+          tilesEnabled={false}      // fast + stable previews
+          cacheEnabled              // improves draw in scroll lists
+          liteMode={Platform.OS === 'android'} // Android tiny-map stability
+          scrollEnabled={false}
+          zoomEnabled={false}
+          rotateEnabled={false}
+          pitchEnabled={false}
+          onMapReady={() => setMapReady(true)}
+          pointerEvents="none"      // thumbnails don't need interaction
+          style={styles.previewMap} // rounded corners applied to the map
+        >
+          {coords[0] && (
+            <Marker coordinate={{ latitude: coords[0].latitude, longitude: coords[0].longitude }} />
+          )}
+          {hasRoute && (
+            <Polyline
+              coordinates={coords.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
+              strokeWidth={2}
+              strokeColor={liveColor}
+            />
+          )}
+        </MapBase>
+      </View>
+
+      <Text style={styles.subtitle}>
+        {new Date(item.timestamp).toLocaleString()} • {Math.round(item.duration)}s
+      </Text>
+    </TouchableOpacity>
+  );
+});
+
 const styles = StyleSheet.create({
   container: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   message: { color: '#666', textAlign: 'center', padding: 16 },
+
   chipScroll: { maxHeight: 40, marginVertical: 4 },
   chipContainer: { paddingHorizontal: 8 },
   chip: {
@@ -237,8 +296,10 @@ const styles = StyleSheet.create({
   chipSelected: { backgroundColor: '#007AFF' },
   chipText: { color: '#333' },
   chipTextSelected: { color: '#FFF' },
+
   item: { padding: 16, borderBottomWidth: 1, borderColor: '#EEE' },
   title: { fontSize: 16, fontWeight: 'bold' },
+
   badgesRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 4 },
   badge: {
     backgroundColor: '#CCC',
@@ -249,7 +310,9 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   badgeText: { fontSize: 12, color: '#333' },
-  previewWrap: { height: 110, marginVertical: 8, borderRadius: 8, overflow: 'hidden' },
+
+  previewWrap: { height: 110, marginVertical: 8, borderRadius: 8 }, // no overflow hidden here
+  previewMap: { ...StyleSheet.absoluteFillObject, borderRadius: 8, overflow: 'hidden' },
   subtitle: { color: '#666' },
   empty: { textAlign: 'center', marginTop: 32, color: '#666' },
 });
