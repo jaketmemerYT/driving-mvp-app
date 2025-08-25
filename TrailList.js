@@ -13,62 +13,72 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   StyleSheet,
-  Button,
 } from 'react-native';
-import MapView, { Marker, Polyline, UrlTile } from 'react-native-maps';
 import axios from 'axios';
 import { useFocusEffect } from '@react-navigation/native';
+import { Marker, Polyline } from 'react-native-maps';
+
+import MapBase from './MapBase';
 import { API_BASE } from './config';
 import { UserContext } from './UserContext';
 
 export default function TrailList({ navigation }) {
-  const { user } = useContext(UserContext);
+  const { prefs } = useContext(UserContext);
 
-  const [trails, setTrails] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [trails, setTrails] = useState([]);
   const [categories, setCategories] = useState([]);
-  const [trailCatsMap, setTrailCatsMap] = useState({});
   const [groups, setGroups] = useState([]);
+
+  // trailId -> [categoryId, ...]
+  const [trailCatsMap, setTrailCatsMap] = useState({});
+  // trailId -> runs count
+  const [trailRunCount, setTrailRunCount] = useState({});
+
+  // filters
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [filterCatIds, setFilterCatIds] = useState([]);
 
-  // Header: New Trail
+  // Keep header simple; App.js attaches the "New" button
   useLayoutEffect(() => {
-    navigation.setOptions({
-      title: 'Trails',
-      headerRight: () => (
-        <Button title="New" onPress={() => navigation.navigate('AddTrail')} />
-      ),
-    });
+    navigation.setOptions({ title: 'Trails' });
   }, [navigation]);
 
-  // Load/refresh on focus
   useFocusEffect(
     useCallback(() => {
       let active = true;
+
       const loadAll = async () => {
         try {
-          const [tRes, cRes, gRes] = await Promise.all([
+          setLoading(true);
+
+          // Load trails, cats, groups, and routes (for counts)
+          const [tRes, cRes, gRes, rRes] = await Promise.all([
             axios.get(`${API_BASE}/api/trailheads`),
             axios.get(`${API_BASE}/api/categories`),
             axios.get(`${API_BASE}/api/groups`),
+            axios.get(`${API_BASE}/api/routes`),
           ]);
           if (!active) return;
 
-          setTrails(tRes.data);
-          setCategories(cRes.data);
-          setGroups(gRes.data);
+          setTrails(tRes.data || []);
+          setCategories(cRes.data || []);
+          setGroups(gRes.data || []);
 
-          // pick default group (first one) if none selected yet
-          if (!selectedGroup && gRes.data.length > 0) {
-            const g = gRes.data[0];
-            setSelectedGroup(g);
-            setFilterCatIds(g.categoryIds || []);
+          // Default selected group + category filter = group's categories
+          if (gRes.data && gRes.data.length > 0) {
+            const grp = gRes.data[0];
+            setSelectedGroup(grp);
+            setFilterCatIds(grp.categoryIds || []);
+          } else {
+            setSelectedGroup(null);
+            setFilterCatIds([]);
           }
 
-          // build trail -> [categoryId,...] map
+          // Build trail -> categories map
           const tcMap = {};
           await Promise.all(
-            tRes.data.map(async (t) => {
+            (tRes.data || []).map(async (t) => {
               try {
                 const resp = await axios.get(
                   `${API_BASE}/api/trailheads/${t.id}/categories`
@@ -79,26 +89,33 @@ export default function TrailList({ navigation }) {
               }
             })
           );
-          if (active) setTrailCatsMap(tcMap);
+          if (!active) return;
+          setTrailCatsMap(tcMap);
+
+          // Build trail run counts from routes
+          const counts = {};
+          (rRes.data || []).forEach((run) => {
+            counts[run.trailId] = (counts[run.trailId] || 0) + 1;
+          });
+          setTrailRunCount(counts);
         } catch (err) {
-          console.error('Error loading trails/cats/groups:', err);
-          if (active) {
-            setTrails([]);
-            setCategories([]);
-            setGroups([]);
-            setTrailCatsMap({});
-          }
+          console.error(err);
+        } finally {
+          if (active) setLoading(false);
         }
       };
 
       loadAll();
+
       return () => {
         active = false;
       };
-    }, [selectedGroup?.id]) // refresh if group context changes
+    }, [])
   );
 
-  if (!trails || !categories.length || !groups.length) {
+  const officialColor = prefs?.officialRouteColor || '#000000';
+
+  if (loading) {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" />
@@ -106,108 +123,22 @@ export default function TrailList({ navigation }) {
     );
   }
 
-  // Group/category filtering
+  // Apply group/category filters
   const visibleTrails = trails.filter((t) => {
     const tCats = trailCatsMap[t.id] || [];
-    if (!selectedGroup?.categoryIds?.length) {
-      // group has no category restriction — allow manual filter only
-      return (
-        filterCatIds.length === 0 ||
-        tCats.some((id) => filterCatIds.includes(id))
-      );
-    }
-    // must match group categories
-    const inGroup = tCats.some((id) => selectedGroup.categoryIds.includes(id));
-    // and manual selection (if any)
-    const inManual =
+    // If group selected with categories, require at least one match
+    const baseOK = !selectedGroup?.categoryIds?.length
+      ? true
+      : tCats.some((id) => selectedGroup.categoryIds.includes(id));
+    // Manual category filter via chips (optional)
+    const manualOK =
       filterCatIds.length === 0 || tCats.some((id) => filterCatIds.includes(id));
-    return inGroup && inManual;
+    return baseOK && manualOK;
   });
-
-  const renderTrail = ({ item }) => {
-    const start = item.coords || null;
-    const end = item.endCoords || null;
-    const line = Array.isArray(item.route) ? item.route : [];
-
-    const initialRegion =
-      (line && line.length > 0
-        ? {
-            latitude: line[0].latitude,
-            longitude: line[0].longitude,
-          }
-        : start) || { latitude: 0, longitude: 0 };
-
-    const region =
-      initialRegion.latitude != null
-        ? {
-            ...initialRegion,
-            latitudeDelta: 0.02,
-            longitudeDelta: 0.02,
-          }
-        : null;
-
-    const tCats = trailCatsMap[item.id] || [];
-
-    return (
-      <TouchableOpacity
-        style={styles.item}
-        onPress={() =>
-          navigation.navigate('TrailDetail', {
-            trailId: item.id,
-            trailName: item.name,
-          })
-        }
-      >
-        <Text style={styles.title}>{item.name}</Text>
-        <View style={styles.badgesRow}>
-          {tCats.map((cid) => {
-            const cat = categories.find((c) => c.id === cid);
-            return cat ? (
-              <View style={styles.badge} key={cid}>
-                <Text style={styles.badgeText}>{cat.name}</Text>
-              </View>
-            ) : null;
-          })}
-        </View>
-
-        {region && (
-          <MapView
-            style={styles.preview}
-            initialRegion={region}
-            scrollEnabled={false}
-            zoomEnabled={false}
-            pitchEnabled={false}
-            rotateEnabled={false}
-          >
-            {/* OpenStreetMap tiles for context */}
-            <UrlTile
-              urlTemplate="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
-              maximumZ={19}
-              flipY={false}
-            />
-            {start && <Marker coordinate={start} title="Start" />}
-            {end && <Marker coordinate={end} title="End" pinColor="green" />}
-
-            {line.length > 1 && (
-              <Polyline
-                coordinates={line}
-                strokeWidth={3}
-                strokeColor="black"
-              />
-            )}
-          </MapView>
-        )}
-
-        <Text style={styles.subtitle}>
-          {item.difficulty ? `Difficulty: ${item.difficulty}` : 'Difficulty: —'}
-        </Text>
-      </TouchableOpacity>
-    );
-  };
 
   return (
     <View style={styles.container}>
-      {/* Group switcher */}
+      {/* Group picker */}
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
@@ -233,7 +164,7 @@ export default function TrailList({ navigation }) {
         })}
       </ScrollView>
 
-      {/* Category filter row */}
+      {/* Category filter */}
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
@@ -262,13 +193,70 @@ export default function TrailList({ navigation }) {
         })}
       </ScrollView>
 
+      {/* Trail list */}
       {visibleTrails.length === 0 ? (
         <Text style={styles.empty}>No trails match your filters.</Text>
       ) : (
         <FlatList
           data={visibleTrails}
-          keyExtractor={(t) => t.id}
-          renderItem={renderTrail}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item }) => {
+            // map preview settings
+            const start = item.coords && item.coords.latitude != null
+              ? item.coords
+              : null;
+            const initialRegion = start
+              ? { ...start, latitudeDelta: 0.02, longitudeDelta: 0.02 }
+              : { latitude: 0, longitude: 0, latitudeDelta: 60, longitudeDelta: 60 };
+
+            const tCats = trailCatsMap[item.id] || [];
+            const count = trailRunCount[item.id] || 0;
+
+            return (
+              <TouchableOpacity
+                style={styles.item}
+                onPress={() =>
+                  navigation.navigate('TrailDetail', {
+                    trailId: item.id,
+                    trailName: item.name,
+                  })
+                }
+              >
+                <Text style={styles.title}>{item.name}</Text>
+
+                {/* badges */}
+                <View style={styles.badgesRow}>
+                  {tCats.map((cid) => {
+                    const cat = categories.find((c) => c.id === cid);
+                    return cat ? (
+                      <View style={styles.badge} key={cid}>
+                        <Text style={styles.badgeText}>{cat.name}</Text>
+                      </View>
+                    ) : null;
+                  })}
+                </View>
+
+                {/* preview map with official route & markers */}
+                <MapBase style={styles.preview} initialRegion={initialRegion}>
+                  {Array.isArray(item.route) && item.route.length > 1 && (
+                    <Polyline
+                      coordinates={item.route}
+                      strokeWidth={3}
+                      strokeColor={officialColor}
+                    />
+                  )}
+                  {item.coords && <Marker coordinate={item.coords} title="Trailhead" />}
+                  {item.endCoords && (
+                    <Marker coordinate={item.endCoords} title="End" pinColor="green" />
+                  )}
+                </MapBase>
+
+                <Text style={styles.subtitle}>
+                  Difficulty: {item.difficulty || 'Unknown'} • {count} run{count === 1 ? '' : 's'}
+                </Text>
+              </TouchableOpacity>
+            );
+          }}
         />
       )}
     </View>
@@ -276,11 +264,11 @@ export default function TrailList({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-
-  chipScroll: { maxHeight: 40, marginVertical: 4 },
+  container:     { flex: 1 },
+  center:        { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  chipScroll:    { maxHeight: 40, marginVertical: 4 },
   chipContainer: { paddingHorizontal: 8 },
+
   chip: {
     paddingHorizontal: 12,
     paddingVertical: 6,
@@ -288,13 +276,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#EEE',
     marginHorizontal: 4,
   },
-  chipSelected: { backgroundColor: '#007AFF' },
-  chipText: { color: '#333' },
+  chipSelected:     { backgroundColor: '#007AFF' },
+  chipText:         { color: '#333' },
   chipTextSelected: { color: '#FFF' },
 
-  item: { padding: 16, borderBottomWidth: 1, borderColor: '#EEE' },
-  title: { fontSize: 16, fontWeight: 'bold' },
-  badgesRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 4 },
+  item:       { padding: 16, borderBottomWidth: 1, borderColor: '#EEE' },
+  title:      { fontSize: 16, fontWeight: 'bold' },
+  badgesRow:  { flexDirection: 'row', flexWrap: 'wrap', marginTop: 4 },
   badge: {
     backgroundColor: '#CCC',
     paddingHorizontal: 6,
@@ -303,9 +291,10 @@ const styles = StyleSheet.create({
     marginRight: 4,
     marginBottom: 4,
   },
-  badgeText: { fontSize: 12, color: '#333' },
+  badgeText:  { fontSize: 12, color: '#333' },
 
-  preview: { height: 120, marginVertical: 8, borderRadius: 8, overflow: 'hidden' },
-  subtitle: { color: '#666' },
-  empty: { textAlign: 'center', marginTop: 32, color: '#666' },
+  preview:    { height: 120, marginVertical: 8, borderRadius: 8, overflow: 'hidden' },
+  subtitle:   { color: '#666' },
+
+  empty:      { textAlign: 'center', marginTop: 32, color: '#666' },
 });

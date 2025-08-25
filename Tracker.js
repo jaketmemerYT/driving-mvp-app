@@ -1,11 +1,5 @@
 // Tracker.js
-import React, {
-  useState,
-  useRef,
-  useEffect,
-  useLayoutEffect,
-  useContext,
-} from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useContext } from 'react';
 import {
   View,
   Text,
@@ -15,145 +9,111 @@ import {
   TouchableOpacity,
   Button,
 } from 'react-native';
-import MapView, { Polyline, Marker, UrlTile } from 'react-native-maps';
+import { Polyline, Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
 import axios from 'axios';
+
+import MapBase from './MapBase';            // <-- tiled base map
 import { API_BASE } from './config';
 import { UserContext } from './UserContext';
 
-/** Haversine distance (meters) */
-function distanceMeters(a, b) {
-  const toRad = (d) => (d * Math.PI) / 180;
+// --- helpers ---
+const FT_TO_M = 0.3048;
+
+function haversineMeters(a, b) {
+  const toRad = d => (d * Math.PI) / 180;
   const R = 6371000;
   const dLat = toRad(b.latitude - a.latitude);
   const dLon = toRad(b.longitude - a.longitude);
   const lat1 = toRad(a.latitude);
   const lat2 = toRad(b.latitude);
-  const sdLat = Math.sin(dLat / 2);
-  const sdLon = Math.sin(dLon / 2);
-  const sq = sdLat * sdLat + sdLon * sdLon * Math.cos(lat1) * Math.cos(lat2);
-  return 2 * R * Math.asin(Math.sqrt(sq));
+  const s1 = Math.sin(dLat / 2);
+  const s2 = Math.sin(dLon / 2);
+  const h = s1 * s1 + s2 * s2 * Math.cos(lat1) * Math.cos(lat2);
+  return 2 * R * Math.asin(Math.sqrt(h));
 }
 
-/** Distance from point P to segment AB (meters) */
-function pointToSegmentMeters(p, a, b) {
-  // convert to planar approximate via lat/long degrees -> rough meters using local scale
-  // For short segments, we can project in degrees with cosine latitude correction.
-  const latMeters = 111320; // ~ meters per degree latitude
-  const cosLat = Math.cos(((a.latitude + b.latitude) / 2) * (Math.PI / 180));
-  const lonMeters = 111320 * cosLat;
-
-  const ax = a.longitude * lonMeters;
-  const ay = a.latitude * latMeters;
-  const bx = b.longitude * lonMeters;
-  const by = b.latitude * latMeters;
-  const px = p.longitude * lonMeters;
-  const py = p.latitude * latMeters;
-
-  const abx = bx - ax;
-  const aby = by - ay;
-  const apx = px - ax;
-  const apy = py - ay;
-
-  const ab2 = abx * abx + aby * aby || 1e-9;
-  let t = (apx * abx + apy * aby) / ab2;
-  t = Math.max(0, Math.min(1, t));
-
-  const cx = ax + t * abx;
-  const cy = ay + t * aby;
-
-  const dx = px - cx;
-  const dy = py - cy;
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
-/** Min distance from point to polyline (meters) */
-function minDistanceToPolylineMeters(p, polyline) {
+// nearest distance to any point in an official polyline (fast, good enough for MVP)
+function minDistanceToPolylineMeters(pt, polyline) {
   if (!Array.isArray(polyline) || polyline.length === 0) return Infinity;
-  if (polyline.length === 1) return distanceMeters(p, polyline[0]);
   let min = Infinity;
-  for (let i = 1; i < polyline.length; i++) {
-    const d = pointToSegmentMeters(p, polyline[i - 1], polyline[i]);
+  for (let i = 0; i < polyline.length; i++) {
+    const d = haversineMeters(pt, polyline[i]);
     if (d < min) min = d;
   }
   return min;
 }
 
 export default function Tracker({ route, navigation }) {
+  const { user, prefs } = useContext(UserContext);
   const {
     trailId,
     trailName,
-    startCoords,
-    endCoords,
-    officialRoute = [],
+    startCoords: startFromDetail,      // optional
+    endCoords: endFromDetail,          // optional
   } = route.params;
 
-  const { user, prefs } = useContext(UserContext);
-
-  // vehicles
+  const [trail, setTrail] = useState(null); // fetch ensures we have official route
   const [vehicles, setVehicles] = useState(null);
   const [selectedVehicleId, setSelectedVehicleId] = useState(null);
 
-  // tracking state
   const [tracking, setTracking] = useState(false);
-  const [strokeColor, setStrokeColor] = useState(
-    prefs?.liveRouteColor || '#1976D2'
-  );
-
-  // coords
-  const coordsRef = useRef(startCoords ? [startCoords] : []);
-  const [coords, setCoords] = useState(coordsRef.current);
-
-  // map
   const [region, setRegion] = useState(
-    startCoords
-      ? {
-          ...startCoords,
-          latitudeDelta: 0.01,
-          longitudeDelta: 0.01,
-        }
+    startFromDetail
+      ? { ...startFromDetail, latitudeDelta: 0.01, longitudeDelta: 0.01 }
       : null
   );
-  const mapRef = useRef(null);
 
-  // timing + watcher
-  const startTimeRef = useRef(null);
+  const coordsRef = useRef([]);
+  const [coords, setCoords] = useState([]);
+
+  const startTime = useRef(null);
   const watchRef = useRef(null);
-  const abortedRef = useRef(false);
+  const [strokeColor, setStrokeColor] = useState(
+    prefs?.routeColor || '#1E90FF' // live route color default
+  );
 
-  // thresholds (meters) + colors from prefs with safe defaults
-  const warnDist = (prefs?.warnDistanceFt ?? 50) * 0.3048;   // 50 ft
-  const alertDist = (prefs?.alertDistanceFt ?? 75) * 0.3048; // 75 ft
-  const failDist = (prefs?.offRouteFailFt ?? 100) * 0.3048;  // 100 ft
-
-  const liveColor = prefs?.liveRouteColor || '#1976D2';
-  const warnColor = prefs?.warnColor || '#FFA000';
-  const alertColor = prefs?.alertColor || '#D32F2F';
-  const officialColor = prefs?.officialRouteColor || '#000000';
-
-  // Load vehicles for this user on focus
+  // --- load trail & vehicles on focus ---
   useEffect(() => {
-    const unsub = navigation.addListener('focus', () => {
-      if (!user) {
-        setVehicles([]);
-        setSelectedVehicleId(null);
-        return;
-      }
-      axios
-        .get(`${API_BASE}/api/vehicles?userId=${user.id}`)
-        .then((r) => {
-          setVehicles(r.data);
-          if (r.data.length === 1) setSelectedVehicleId(r.data[0].id);
-        })
-        .catch((e) => {
-          console.error('Vehicle load failed', e);
-          Alert.alert('Error', 'Could not load your vehicles.');
-        });
-    });
-    return unsub;
-  }, [navigation, user]);
+    let active = true;
 
-  // header
+    const load = async () => {
+      try {
+        // fetch the single trail so we have official route + endCoords
+        const t = await axios.get(`${API_BASE}/api/trailheads/${trailId}`);
+        if (!active) return;
+        setTrail(t.data);
+
+        // vehicles limited to current user, if any
+        if (user?.id) {
+          const v = await axios.get(`${API_BASE}/api/vehicles?userId=${user.id}`);
+          if (!active) return;
+          setVehicles(v.data);
+          if (v.data.length === 1) setSelectedVehicleId(v.data[0].id);
+        } else {
+          setVehicles([]); // no user selected
+        }
+
+        // if no region yet and we have start coords (from trail), seed map
+        const start = startFromDetail || t.data.coords;
+        if (!region && start && start.latitude != null) {
+          setRegion({ ...start, latitudeDelta: 0.01, longitudeDelta: 0.01 });
+        }
+      } catch (err) {
+        console.error(err);
+        Alert.alert('Error', 'Could not load trail/vehicles.');
+      }
+    };
+
+    const unsubscribe = navigation.addListener('focus', load);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navigation, trailId, user?.id]);
+
+  // --- header start/stop ---
   useLayoutEffect(() => {
     navigation.setOptions({
       title: trailName || 'Tracker',
@@ -161,189 +121,94 @@ export default function Tracker({ route, navigation }) {
         <Button
           title={tracking ? 'Stop' : 'Start'}
           onPress={tracking ? stopTracking : startTracking}
-          disabled={!selectedVehicleId || !user}
+          disabled={!selectedVehicleId}
         />
       ),
     });
-  }, [navigation, tracking, selectedVehicleId, user]);
+  }, [navigation, tracking, selectedVehicleId, trailName]);
 
-  // Ensure we have an initial region even if startCoords missing
-  useEffect(() => {
-    let done = false;
-    (async () => {
-      if (region) return;
-      try {
-        const { status } = await Location.requestForegroundPermissionsAsync();
-        if (status !== 'granted') return;
-        const loc = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.High,
-        });
-        if (!done) {
-          const seed = {
-            latitude: loc.coords.latitude,
-            longitude: loc.coords.longitude,
-          };
-          if (coordsRef.current.length === 0) {
-            coordsRef.current = [seed];
-            setCoords([...coordsRef.current]);
-          }
-          setRegion({
-            ...seed,
-            latitudeDelta: 0.01,
-            longitudeDelta: 0.01,
-          });
-        }
-      } catch (e) {
-        console.error('Initial region failed', e);
-      }
-    })();
-    return () => {
-      done = true;
-    };
-  }, [region]);
-
-  // ——————— Start Tracking ———————
+  // --- start tracking ---
   const startTracking = async () => {
-    if (!user) return Alert.alert('Profile', 'Please select a user first.');
-    if (!selectedVehicleId)
-      return Alert.alert('Vehicle', 'Please select a vehicle.');
+    if (!user?.id) return Alert.alert('Profile', 'Select a profile first in Profile tab.');
+    if (!selectedVehicleId) return Alert.alert('Vehicle', 'Pick a vehicle to continue.');
 
-    try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        return Alert.alert('Permission needed', 'Allow location to track.');
-      }
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      return Alert.alert('Location', 'Permission denied.');
+    }
 
-      // seed initial point from GPS (full object)
-      const initial = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
+    const initialLoc = await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.High,
+    });
+    const startPt = { ...initialLoc.coords };
+    coordsRef.current = [startPt];
+    setCoords([startPt]);
+
+    if (!region) {
+      setRegion({
+        ...initialLoc.coords,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
       });
-      const seed = {
-        latitude: initial.coords.latitude,
-        longitude: initial.coords.longitude,
-        speed: initial.coords.speed ?? 0,
-        heading: initial.coords.heading ?? 0,
-        altitude: initial.coords.altitude ?? 0,
-        accuracy: initial.coords.accuracy ?? 0,
-        timestamp: Date.now(),
-      };
-      coordsRef.current = [seed];
-      setCoords([...coordsRef.current]);
+    }
 
-      // center map
-      setRegion((r) => ({
-        latitude: seed.latitude,
-        longitude: seed.longitude,
-        latitudeDelta: r?.latitudeDelta ?? 0.01,
-        longitudeDelta: r?.longitudeDelta ?? 0.01,
-      }));
+    startTime.current = Date.now();
+    setTracking(true);
 
-      setStrokeColor(liveColor);
-      abortedRef.current = false;
-      startTimeRef.current = Date.now();
-      setTracking(true);
+    // reset to preferred live color on start
+    setStrokeColor(prefs?.routeColor || '#1E90FF');
 
-      // subscribe
-      try {
-        watchRef.current?.remove?.();
-      } catch {}
-      watchRef.current = await Location.watchPositionAsync(
-        {
-          accuracy: Location.Accuracy.High,
-          distanceInterval: 1,
-          timeInterval: 1000,
-        },
-        (loc) => {
-          // append point (deep copy to avoid "cannot add property" issues)
-          const pt = {
-            latitude: loc.coords.latitude,
-            longitude: loc.coords.longitude,
-            speed: loc.coords.speed ?? 0,
-            heading: loc.coords.heading ?? 0,
-            altitude: loc.coords.altitude ?? 0,
-            accuracy: loc.coords.accuracy ?? 0,
-            timestamp: Date.now(),
-          };
-          coordsRef.current.push(pt);
-          setCoords([...coordsRef.current]);
+    watchRef.current = await Location.watchPositionAsync(
+      { accuracy: Location.Accuracy.High, distanceInterval: 1, timeInterval: 1000 },
+      (loc) => {
+        const pt = { ...loc.coords };
+        coordsRef.current.push(pt);
+        setCoords([...coordsRef.current]);
 
-          // animate map
-          mapRef.current?.animateToRegion({
-            latitude: pt.latitude,
-            longitude: pt.longitude,
-            latitudeDelta: region?.latitudeDelta ?? 0.01,
-            longitudeDelta: region?.longitudeDelta ?? 0.01,
-          });
+        // keep map centered
+        setRegion((r) =>
+          r
+            ? { ...r, latitude: pt.latitude, longitude: pt.longitude }
+            : { ...pt, latitudeDelta: 0.01, longitudeDelta: 0.01 }
+        );
 
-          // deviation logic (only if officialRoute provided)
-          if (officialRoute && officialRoute.length >= 2) {
-            const d = minDistanceToPolylineMeters(pt, officialRoute);
-            if (d > failDist && !abortedRef.current) {
-              abortedRef.current = true;
-              setStrokeColor(alertColor);
-              Alert.alert(
-                'Off course',
-                'You have strayed more than the allowed distance. This run is invalid.'
-              );
-              // stop without upload
-              safeStopWatcher();
-              setTracking(false);
-              return;
-            } else if (d > alertDist) {
-              setStrokeColor(alertColor);
-            } else if (d > warnDist) {
-              setStrokeColor(warnColor);
-            } else {
-              setStrokeColor(liveColor);
-            }
-          }
-
-          // auto-stop if near end
-          if (endCoords) {
-            const endRadius = (prefs?.arriveRadiusMeters ?? 6); // ~20ft
-            const toEnd = distanceMeters(pt, endCoords);
-            if (toEnd <= endRadius) {
-              stopTracking(); // will upload
-            }
+        // deviation warnings vs official route (if present)
+        const official = trail?.route || [];
+        if (official.length > 0) {
+          const distM = minDistanceToPolylineMeters(pt, official);
+          const warn50 = (prefs?.warn50Feet ?? 50) * FT_TO_M;
+          const warn75 = (prefs?.warn75Feet ?? 75) * FT_TO_M;
+          if (distM > warn75) {
+            setStrokeColor(prefs?.warn75Color || '#FF0000');
+          } else if (distM > warn50) {
+            setStrokeColor(prefs?.warn50Color || '#FFA500');
+          } else {
+            setStrokeColor(prefs?.routeColor || '#1E90FF');
           }
         }
-      );
-    } catch (err) {
-      console.error('startTracking error', err);
-      Alert.alert('Error', err.message || 'Could not start tracking');
-    }
+      }
+    );
   };
 
-  // ——————— Stop Tracking ———————
-  const safeStopWatcher = () => {
-    try {
-      watchRef.current?.remove?.();
-    } catch {}
-    watchRef.current = null;
-  };
-
+  // --- stop tracking ---
   const stopTracking = async () => {
-    safeStopWatcher();
+    watchRef.current?.remove();
+    watchRef.current = null;
     setTracking(false);
 
-    if (abortedRef.current) {
-      // already shown an alert; do not upload, just reset
-      coordsRef.current = [];
-      setCoords([]);
-      setStrokeColor(liveColor);
-      return;
-    }
-
     const runCoords = coordsRef.current;
-    if (!runCoords.length) {
-      Alert.alert('No data', 'No GPS points were recorded.');
-      return;
+    if (!runCoords || runCoords.length === 0) {
+      return Alert.alert('No GPS', 'No GPS points recorded.');
     }
 
-    const duration = (Date.now() - (startTimeRef.current || Date.now())) / 1000;
-    const avgSpeed =
-      runCoords.reduce((sum, p) => sum + (p.speed || 0), 0) / runCoords.length || 0;
+    // duration
+    const duration = (Date.now() - (startTime.current || Date.now())) / 1000;
 
+    // avg speed from points (m/s average of samples)
+    const avgSpeed =
+      runCoords.reduce((sum, c) => sum + (c.speed || 0), 0) / runCoords.length || 0;
+
+    // post run
     try {
       const payload = {
         trailId,
@@ -356,115 +221,82 @@ export default function Tracker({ route, navigation }) {
       };
       const res = await axios.post(`${API_BASE}/api/routes`, payload);
 
-      // navigate to RunDetail (replace)
-      navigation.replace('RunDetail', {
-        run: res.data,
-        trailName: trailName || 'Trail',
-      });
-    } catch (err) {
-      console.error('Upload failed', err);
-      Alert.alert(
-        'Upload failed',
-        err.response?.data?.error || err.message || 'Unknown error'
-      );
-    } finally {
-      // reset buffer for next time
+      // clear local buffer
       coordsRef.current = [];
       setCoords([]);
-      setStrokeColor(liveColor);
+
+      navigation.replace('RunDetail', { run: res.data, trailName });
+    } catch (err) {
+      console.error(err);
+      Alert.alert('Upload failed', err.response?.data?.error || err.message);
     }
   };
 
-  // cleanup on unmount
-  useEffect(() => {
-    return () => {
-      safeStopWatcher();
-    };
-  }, []);
+  // --- render states ---
+  if (!user) {
+    return (
+      <View style={styles.center}>
+        <Text>Select a profile first in the Profile tab.</Text>
+      </View>
+    );
+  }
 
-  // ——————— UI ———————
-  // vehicles loading
-  if (vehicles === null || !region) {
+  if (vehicles === null || !trail) {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" />
-        {!user && <Text style={styles.dim}>Select a profile first…</Text>}
       </View>
     );
   }
 
-  // no vehicles for this user
-  if (!tracking && vehicles.length === 0) {
+  if (vehicles.length === 0) {
     return (
       <View style={styles.center}>
-        <Text style={styles.dim}>You have no vehicles yet.</Text>
-        <Button
-          title="Add a Vehicle"
-          onPress={() => navigation.navigate('VehicleList')}
-        />
+        <Button title="Add a Vehicle" onPress={() => navigation.navigate('AddVehicle')} />
       </View>
     );
   }
 
-  // vehicle picker before tracking (only if user has multiple)
-  if (!tracking && vehicles.length > 1 && !selectedVehicleId) {
+  if (!tracking) {
     return (
       <View style={styles.container}>
         <Text style={styles.subheader}>Select Your Vehicle</Text>
         {vehicles.map((v) => (
           <TouchableOpacity
             key={v.id}
-            style={[
-              styles.vehicleItem,
-              v.id === selectedVehicleId && styles.selectedVehicle,
-            ]}
+            style={[styles.vehicleItem, v.id === selectedVehicleId && styles.selectedVehicle]}
             onPress={() => setSelectedVehicleId(v.id)}
           >
             <Text>{`${v.make} ${v.model} (${v.year})`}</Text>
           </TouchableOpacity>
         ))}
-        <View style={{ padding: 12 }}>
-          <Button
-            title="Start"
-            onPress={startTracking}
-            disabled={!selectedVehicleId}
-          />
-        </View>
       </View>
     );
   }
 
-  // main map (tracking OR user has exactly one vehicle already selected)
-  return (
-    <MapView ref={mapRef} style={styles.map} initialRegion={region}>
-      {/* OSM base tiles for visible background */}
-      <UrlTile
-        urlTemplate="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        maximumZ={19}
-        shouldReplaceMapContent
-      />
+  // tracking map
+  const startMarker = coords[0];
+  const lastMarker = coords[coords.length - 1];
+  const official = trail?.route || [];
+  const officialColor = prefs?.officialRouteColor || '#000000';
 
-      {/* official route always visible if passed in */}
-      {officialRoute && officialRoute.length > 1 && (
-        <Polyline
-          coordinates={officialRoute.map((p) => ({
-            latitude: p.latitude,
-            longitude: p.longitude,
-          }))}
-          strokeWidth={4}
-          strokeColor={officialColor}
-        />
+  return (
+    <MapBase style={styles.map} initialRegion={region}>
+      {/* official route */}
+      {official.length > 1 && (
+        <Polyline coordinates={official} strokeWidth={4} strokeColor={officialColor} />
       )}
 
       {/* live route */}
-      {coords.length > 0 && (
-        <>
-          <Polyline coordinates={coords} strokeWidth={5} strokeColor={strokeColor} />
-          <Marker coordinate={coords[0]} title="Start" />
-          <Marker coordinate={coords[coords.length - 1]} title="Current" />
-        </>
-      )}
-    </MapView>
+      {coords.length > 1 && <Polyline coordinates={coords} strokeWidth={4} strokeColor={strokeColor} />}
+
+      {/* markers */}
+      {trail?.coords && <Marker coordinate={trail.coords} title="Trailhead" />}
+      {trail?.endCoords && <Marker coordinate={trail.endCoords} title="End" pinColor="green" />}
+      {startMarker && <Marker coordinate={startMarker} title="Start (This run)" />}
+      {lastMarker && <Marker coordinate={lastMarker} title="You" />}
+      {trail?.endCoords && <Circle center={trail.endCoords} radius={6} />}
+    </MapBase>
   );
 }
 
@@ -472,17 +304,16 @@ const styles = StyleSheet.create({
   container: { flex: 1, padding: 16 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   map: { flex: 1 },
-  subheader: { marginBottom: 8, fontWeight: '600' },
+  subheader: { marginBottom: 8, fontWeight: '500' },
   vehicleItem: {
     padding: 12,
     borderWidth: 1,
     borderColor: '#ccc',
-    borderRadius: 6,
+    borderRadius: 4,
     marginBottom: 8,
   },
   selectedVehicle: {
     borderColor: '#007AFF',
     backgroundColor: '#E6F0FF',
   },
-  dim: { color: '#666', marginTop: 8, textAlign: 'center' },
 });
