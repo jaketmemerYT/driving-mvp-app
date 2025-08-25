@@ -23,6 +23,7 @@ import axios from 'axios';
 import MapBase from './MapBase';
 import { API_BASE } from './config';
 import { UserContext } from './UserContext';
+import { useFitToGeometry } from './hooks/useFitToGeometry';
 
 // Simple haversine in meters for live stats
 function distanceMeters(a, b) {
@@ -48,7 +49,7 @@ export default function AddTrail({ navigation }) {
   // Geo state
   const [startCoords, setStartCoords] = useState(null);
   const [endCoords, setEndCoords] = useState(null);
-  const [route, setRoute] = useState([]); // array of { lat, lon, speed, heading, ... }
+  const [route, setRoute] = useState([]); // array of rich points
   const [region, setRegion] = useState(null);
 
   // Recording state
@@ -64,7 +65,7 @@ export default function AddTrail({ navigation }) {
     navigation.setOptions({ title: 'New Trail' });
   }, [navigation]);
 
-  // Initial location → sets startCoords, seeds route with first point, sets region
+  // Initial location → sets startCoords, seeds route, sets region
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -122,7 +123,7 @@ export default function AddTrail({ navigation }) {
     setEndCoords({ latitude: coordinate.latitude, longitude: coordinate.longitude });
   };
 
-  // Derived live stats for a nicer UX while recording
+  // Live stats while recording
   const liveStats = useMemo(() => {
     if (route.length < 2) {
       return { distance: 0, duration: 0, avgSpeed: 0, minSpeed: 0, maxSpeed: 0 };
@@ -141,7 +142,10 @@ export default function AddTrail({ navigation }) {
     if (minS === Infinity) minS = 0;
     if (maxS === -Infinity) maxS = 0;
 
-    const durSec = Math.max(0, Math.round((route[route.length - 1].timestamp - route[0].timestamp) / 1000));
+    const durSec = Math.max(
+      0,
+      Math.round((route[route.length - 1].timestamp - route[0].timestamp) / 1000)
+    );
     const avg = durSec > 0 ? dist / durSec : 0;
     return { distance: dist, duration: durSec, avgSpeed: avg, minSpeed: minS, maxSpeed: maxS };
   }, [route]);
@@ -185,7 +189,7 @@ export default function AddTrail({ navigation }) {
             return [...prev, pt];
           });
 
-          // follow camera
+          // follow camera while recording (kept from your original logic)
           const latDelta = region?.latitudeDelta ?? 0.01;
           const lonDelta = region?.longitudeDelta ?? 0.01;
           mapRef.current?.animateToRegion?.({
@@ -232,8 +236,8 @@ export default function AddTrail({ navigation }) {
         accuracy: p.accuracy ?? 0,
         timestamp: p.timestamp ?? Date.now(),
       })),
-      categoryIds: [], // can be linked later
-      groupIds: [],    // can be linked later
+      categoryIds: [],
+      groupIds: [],
     };
 
     try {
@@ -251,6 +255,18 @@ export default function AddTrail({ navigation }) {
   // Guards
   const canBegin = !!region && !!name.trim() && !recording;
   const canStop = recording && route.length > 0;
+
+  // NEW: standardized auto-fit across screens
+  useFitToGeometry({
+    mapRef,
+    route,
+    start: startCoords,
+    end: endCoords,
+    padding: { top: 60, right: 60, bottom: 60, left: 60 },
+    animated: true,
+    minSpan: 0.0005,
+    debounceMs: 0,
+  });
 
   if (!region) {
     return (
@@ -282,14 +298,9 @@ export default function AddTrail({ navigation }) {
 
       {/* Map with tiles via MapBase */}
       <View style={styles.mapWrap}>
-        <MapBase
-          ref={mapRef}
-          initialRegion={region}
-          onPress={onMapPress}
-        >
+        <MapBase ref={mapRef} initialRegion={region} onPress={onMapPress}>
           {startCoords && <Marker coordinate={startCoords} title="Trailhead" />}
           {endCoords && <Marker coordinate={endCoords} pinColor="green" title="Trail End" />}
-
           {route.length > 1 && (
             <Polyline
               coordinates={route.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
@@ -305,23 +316,15 @@ export default function AddTrail({ navigation }) {
         {recording ? (
           <>
             <View style={styles.statsRow}>
-              <Text style={styles.stat}>
-                Dist: {(liveStats.distance / 1000).toFixed(2)} km
-              </Text>
-              <Text style={styles.stat}>
-                Time: {liveStats.duration}s
-              </Text>
-              <Text style={styles.stat}>
-                Avg: {liveStats.avgSpeed.toFixed(1)} m/s
-              </Text>
+              <Text style={styles.stat}>Dist: {(liveStats.distance / 1000).toFixed(2)} km</Text>
+              <Text style={styles.stat}>Time: {liveStats.duration}s</Text>
+              <Text style={styles.stat}>Avg: {liveStats.avgSpeed.toFixed(1)} m/s</Text>
             </View>
             <Button title="Stop & Save" onPress={stopAndSave} disabled={!canStop} />
           </>
         ) : (
           <>
-            <Text style={styles.hint}>
-              Tip: Tap the map to set an endpoint before you start (optional).
-            </Text>
+            <Text style={styles.hint}>Tip: Tap the map to set an endpoint (optional).</Text>
             <Button title="Begin Recording" onPress={beginRecording} disabled={!canBegin} />
           </>
         )}
@@ -331,7 +334,7 @@ export default function AddTrail({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container:  { flex: 1 },
+  container:  { flex: 1, backgroundColor: '#FFF' },
   center:     { flex: 1, justifyContent: 'center', alignItems: 'center' },
   dim:        { color: '#666', marginTop: 8 },
   form:       { paddingHorizontal: 12, paddingTop: 12 },

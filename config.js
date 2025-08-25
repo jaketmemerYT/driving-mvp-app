@@ -1,19 +1,16 @@
 ﻿// config.js
-
-// run_all.bat script updates api_base.json which gets assigned here
+// API base comes from run_all.bat writing api_base.json (fallback to localhost for dev)
 import api from './api_base.json';
-export const API_BASE = api.API_BASE;
+export const API_BASE = api?.API_BASE || 'http://localhost:3000';
 
-// Set ONE of the tile templates below (comment the others).
+// ---- Map tiles (MapTiler) ----
+export const USE_MAP_TILES       = true;
+export const MAPTILER_STYLE      = 'streets-v2'; // 'streets-v2', 'outdoor-v2', 'satellite', etc.
+export const MAPTILER_TILE_SIZE  = 256;          // 256 works everywhere with UrlTile
+export const MAPTILER_MAX_Z      = 19;
+export const MAPTILER_KEY        = 'JQ0211GgaJpA6x8HhrjH'; // <-- your key
+//export const MAPTILER_KEY    = 'mR436qZUD1j69rWiB5Bc'; // <- your 2nd key
 
-// MapTiler Streets (raster) — recommended
-export const TILE_URL =
-  'https://api.maptiler.com/maps/streets-v2/256/{z}/{x}/{y}.png?key={key}';
-export const TILE_API_KEY = 'mR436qZUD1j69rWiB5Bc';
-
-// If you later use satellite (MapTiler)
-//export const TILE_URL =
-//  'https://api.maptiler.com/tiles/satellite/{z}/{x}/{y}.jpg?key={key}';
-
-// If you don’t want tiles (use platform default), set TILE_URL to null:
-/// export const TILE_URL = null; export const TILE_API_KEY = null;
+// IMPORTANT: keep this EXACT shape (no /tiles, no @2x)
+export const MAPTILER_TILE_URL_TEMPLATE =
+  'https://api.maptiler.com/maps/{style}/{z}/{x}/{y}.png?key={key}';
