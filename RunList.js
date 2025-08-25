@@ -4,8 +4,10 @@ import React, {
   useLayoutEffect,
   useContext,
   useCallback,
-  useRef,
+  useMemo,
   memo,
+  useRef,
+  useEffect,
 } from 'react';
 import {
   View,
@@ -16,16 +18,39 @@ import {
   ActivityIndicator,
   StyleSheet,
   Button,
-  Platform,
+  Image,
 } from 'react-native';
-import { Polyline, Marker } from 'react-native-maps';
+import MapView, { Polyline, Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import axios from 'axios';
 import { useFocusEffect } from '@react-navigation/native';
 
 import MapBase from './MapBase';
 import { API_BASE } from './config';
 import { UserContext } from './UserContext';
-import { useFitToGeometry } from './hooks/useFitToGeometry';
+
+// Snapshot cache (keyed by geometry/version)
+const thumbCache = new Map(); // mapVersion -> file:// URI
+
+// Padded region util (same as TrailList)
+function regionFromPoints(points, { padRatio = 0.12, minSpanDeg = 0.002 } = {}) {
+  if (!Array.isArray(points) || points.length === 0) {
+    return { latitude: 0, longitude: 0, latitudeDelta: 60, longitudeDelta: 60 };
+  }
+  const lats = points.map(p => +p.latitude).filter(Number.isFinite);
+  const lons = points.map(p => +p.longitude).filter(Number.isFinite);
+  if (lats.length === 0 || lons.length === 0) {
+    return { latitude: 0, longitude: 0, latitudeDelta: 60, longitudeDelta: 60 };
+  }
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+  let dLat = Math.max(maxLat - minLat, minSpanDeg);
+  let dLon = Math.max(maxLon - minLon, minSpanDeg);
+  dLat *= (1 + padRatio);
+  dLon *= (1 + padRatio);
+  const lat = (minLat + maxLat) / 2;
+  const lon = (minLon + maxLon) / 2;
+  return { latitude: lat, longitude: lon, latitudeDelta: dLat, longitudeDelta: dLon };
+}
 
 export default function RunList({ navigation }) {
   const { user, prefs } = useContext(UserContext);
@@ -37,7 +62,7 @@ export default function RunList({ navigation }) {
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [filterCatIds, setFilterCatIds] = useState([]);
 
-  const liveColor = prefs?.liveRouteColor || '#1E90FF'; // default blue
+  const liveColor = prefs?.liveRouteColor || '#1E90FF';
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -124,12 +149,7 @@ export default function RunList({ navigation }) {
   return (
     <View style={styles.container}>
       {/* Group chips */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.chipScroll}
-        contentContainerStyle={styles.chipContainer}
-      >
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll} contentContainerStyle={styles.chipContainer}>
         {groups.map((g) => {
           const sel = selectedGroup?.id === g.id;
           return (
@@ -148,12 +168,7 @@ export default function RunList({ navigation }) {
       </ScrollView>
 
       {/* Category chips */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.chipScroll}
-        contentContainerStyle={styles.chipContainer}
-      >
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll} contentContainerStyle={styles.chipContainer}>
         {categories.map((cat) => {
           const sel = filterCatIds.includes(cat.id);
           return (
@@ -176,6 +191,11 @@ export default function RunList({ navigation }) {
         <FlatList
           data={visibleRuns}
           keyExtractor={(item) => item.id}
+          removeClippedSubviews={false}  // keep cells mounted to avoid map remount flicker
+          windowSize={7}
+          initialNumToRender={8}
+          maxToRenderPerBatch={8}
+          updateCellsBatchingPeriod={50}
           renderItem={({ item }) => {
             const trailName = trailsMap[item.trailId] || 'Trail';
             const tCats = trailCatsMap[item.trailId] || [];
@@ -196,41 +216,19 @@ export default function RunList({ navigation }) {
   );
 }
 
-/** Memoized card with its own Map ref + gated auto-fit */
 const RunCard = memo(function RunCard({ item, trailName, tCats, categories, liveColor, onPress }) {
-  const mapRef = useRef(null);
-  const [mapReady, setMapReady] = useState(false);
-
   const coords = Array.isArray(item.coords) ? item.coords : [];
-  const hasRoute = coords.length > 1;
 
-  // Initial region so there's *something* to render before fit
-  const previewRegion = coords.length
-    ? {
-        latitude: coords[0].latitude,
-        longitude: coords[0].longitude,
-        latitudeDelta: 0.02,
-        longitudeDelta: 0.02,
-      }
-    : {
-        latitude: 0,
-        longitude: 0,
-        latitudeDelta: 60,
-        longitudeDelta: 60,
-      };
+  const region = useMemo(
+    () => regionFromPoints(coords, { padRatio: 0.12, minSpanDeg: 0.002 }),
+    [coords]
+  );
 
-  // Auto-fit to the run geometry once map is ready (HALF padding = 12)
-  useFitToGeometry({
-    mapRef,
-    route: coords,
-    start: coords[0] || null,
-    end: coords[coords.length - 1] || null,
-    padding: 12,
-    animated: false,   // thumbnails snap instantly
-    minSpan: 0.0005,
-    debounceMs: 0,
-    enabled: mapReady,
-  });
+  const mapVersion = useMemo(() => {
+    const len = coords.length;
+    const last = len ? `${coords[len-1].latitude.toFixed(5)},${coords[len-1].longitude.toFixed(5)}` : '-';
+    return `${item.id}|${len}|${last}`;
+  }, [item.id, coords]);
 
   return (
     <TouchableOpacity style={styles.item} onPress={onPress} activeOpacity={0.85}>
@@ -244,40 +242,93 @@ const RunCard = memo(function RunCard({ item, trailName, tCats, categories, live
         ))}
       </View>
 
-      <View style={styles.previewWrap}>
-        <MapBase
-          ref={mapRef}
-          initialRegion={previewRegion}
-          tilesEnabled={false}      // fast + stable previews
-          cacheEnabled              // improves draw in scroll lists
-          liteMode={Platform.OS === 'android'} // Android tiny-map stability
-          scrollEnabled={false}
-          zoomEnabled={false}
-          rotateEnabled={false}
-          pitchEnabled={false}
-          onMapReady={() => setMapReady(true)}
-          pointerEvents="none"      // thumbnails don't need interaction
-          style={styles.previewMap} // rounded corners applied to the map
-        >
-          {coords[0] && (
-            <Marker coordinate={{ latitude: coords[0].latitude, longitude: coords[0].longitude }} />
-          )}
-          {hasRoute && (
-            <Polyline
-              coordinates={coords.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
-              strokeWidth={2}
-              strokeColor={liveColor}
-            />
-          )}
-        </MapBase>
-      </View>
+      <StaticThumbnail
+        region={region}
+        coords={coords}
+        color={liveColor}
+        mapVersion={mapVersion}
+      />
 
       <Text style={styles.subtitle}>
-        {new Date(item.timestamp).toLocaleString()} • {Math.round(item.duration)}s
+        {new Date((item.timestamp) || Date.now()).toLocaleString()} • {Math.round(item.duration || 0)}s
       </Text>
     </TouchableOpacity>
   );
 });
+
+const StaticThumbnail = memo(function StaticThumbnail({ region, coords, color, mapVersion }) {
+  const mapRef = useRef(null);
+  const [size, setSize] = useState(null);
+  const [loaded, setLoaded] = useState(false);  // onMapLoaded
+  const [uri, setUri] = useState(() => thumbCache.get(mapVersion) || null);
+
+  useEffect(() => {
+    if (thumbCache.has(mapVersion)) setUri(thumbCache.get(mapVersion));
+    else setUri(null);
+  }, [mapVersion]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (uri || !loaded || !size || !mapRef.current) return;
+      try {
+        await new Promise(r => setTimeout(r, 120)); // let overlays paint
+        const snap = await mapRef.current.takeSnapshot({
+          width: Math.max(1, Math.round(size.width)),
+          height: Math.max(1, Math.round(size.height)),
+          format: 'png',
+          quality: 1,
+          result: 'file',
+        });
+        if (!cancelled && snap) {
+          thumbCache.set(mapVersion, snap);
+          setUri(snap);
+        }
+      } catch (e) {
+        console.warn('Run thumb snapshot failed:', e?.message || e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [uri, loaded, size, mapVersion]);
+
+  return (
+    <View style={styles.previewWrap} onLayout={(e) => setSize(e.nativeEvent.layout)}>
+      {uri ? (
+        <Image source={{ uri }} style={styles.previewMap} resizeMode="cover" />
+      ) : (
+        <MapBase
+          ref={mapRef}
+          provider={PROVIDER_GOOGLE}
+          initialRegion={region}
+          tilesEnabled={false}
+          cacheEnabled={false}
+          liteMode={false}
+          scrollEnabled={false}
+          zoomEnabled={false}
+          rotateEnabled={false}
+          pitchEnabled={false}
+          pointerEvents="none"
+          style={styles.previewMap}
+          onMapLoaded={() => setLoaded(true)}
+        >
+          {coords[0] && (
+            <Marker
+              coordinate={{ latitude: coords[0].latitude, longitude: coords[0].longitude }}
+              tracksViewChanges={false}
+            />
+          )}
+          {coords.length > 1 && (
+            <Polyline
+              coordinates={coords.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
+              strokeWidth={2}
+              strokeColor={color}
+            />
+          )}
+        </MapBase>
+      )}
+    </View>
+  );
+}, (prev, next) => prev.mapVersion === next.mapVersion);
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
@@ -311,7 +362,7 @@ const styles = StyleSheet.create({
   },
   badgeText: { fontSize: 12, color: '#333' },
 
-  previewWrap: { height: 110, marginVertical: 8, borderRadius: 8 }, // no overflow hidden here
+  previewWrap: { height: 110, marginVertical: 8, borderRadius: 8 },
   previewMap: { ...StyleSheet.absoluteFillObject, borderRadius: 8, overflow: 'hidden' },
   subtitle: { color: '#666' },
   empty: { textAlign: 'center', marginTop: 32, color: '#666' },

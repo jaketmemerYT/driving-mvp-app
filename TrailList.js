@@ -1,5 +1,13 @@
 // TrailList.js
-import React, { useEffect, useState, useContext, useCallback, useRef, memo } from 'react';
+import React, {
+  useEffect,
+  useState,
+  useContext,
+  useCallback,
+  useMemo,
+  memo,
+  useRef,
+} from 'react';
 import {
   View,
   Text,
@@ -9,16 +17,39 @@ import {
   FlatList,
   ScrollView,
   Button,
-  Platform,
+  Image,
 } from 'react-native';
-import { Marker, Polyline } from 'react-native-maps';
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import axios from 'axios';
 import { useFocusEffect } from '@react-navigation/native';
 
 import MapBase from './MapBase';
 import { API_BASE } from './config';
 import { UserContext } from './UserContext';
-import { useFitToGeometry } from './hooks/useFitToGeometry';
+
+// In-memory snapshot cache for thumbnails (keyed by geometry/version)
+const thumbCache = new Map(); // mapVersion -> file:// URI
+
+// Compute a stable padded region from points (no native fit → no flicker)
+function regionFromPoints(points, { padRatio = 0.12, minSpanDeg = 0.002 } = {}) {
+  if (!Array.isArray(points) || points.length === 0) {
+    return { latitude: 0, longitude: 0, latitudeDelta: 60, longitudeDelta: 60 };
+  }
+  const lats = points.map(p => +p.latitude).filter(Number.isFinite);
+  const lons = points.map(p => +p.longitude).filter(Number.isFinite);
+  if (lats.length === 0 || lons.length === 0) {
+    return { latitude: 0, longitude: 0, latitudeDelta: 60, longitudeDelta: 60 };
+  }
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+  let dLat = Math.max(maxLat - minLat, minSpanDeg);
+  let dLon = Math.max(maxLon - minLon, minSpanDeg);
+  dLat *= (1 + padRatio);
+  dLon *= (1 + padRatio);
+  const lat = (minLat + maxLat) / 2;
+  const lon = (minLon + maxLon) / 2;
+  return { latitude: lat, longitude: lon, latitudeDelta: dLat, longitudeDelta: dLon };
+}
 
 export default function TrailList({ navigation }) {
   const { prefs } = useContext(UserContext);
@@ -115,75 +146,26 @@ export default function TrailList({ navigation }) {
         <FlatList
           data={visibleTrails}
           keyExtractor={(item) => item.id}
+          removeClippedSubviews={false} // keep mounted to avoid map remount churn
+          windowSize={7}
+          initialNumToRender={8}
+          maxToRenderPerBatch={8}
+          updateCellsBatchingPeriod={50}
           renderItem={({ item }) => {
-            const start = item.coords || null;
-            const end = item.endCoords || null;
-            const route = Array.isArray(item.route) ? item.route : [];
-
-            // Provide a stable initialRegion so the map has something to show before first fit
-            const previewRegion =
-              start
-                ? {
-                    latitude: start.latitude,
-                    longitude: start.longitude,
-                    latitudeDelta: 0.02,
-                    longitudeDelta: 0.02,
-                  }
-                : route.length > 0
-                ? {
-                    latitude: route[0].latitude,
-                    longitude: route[0].longitude,
-                    latitudeDelta: 0.02,
-                    longitudeDelta: 0.02,
-                  }
-                : {
-                    latitude: 0,
-                    longitude: 0,
-                    latitudeDelta: 60,
-                    longitudeDelta: 60,
-                  };
-
             const catIds = trailCatsMap[item.id] || [];
-
             return (
-              <TouchableOpacity
-                style={styles.card}
+              <TrailCard
+                item={item}
+                categories={categories}
+                catIds={catIds}
+                officialColor={officialColor}
                 onPress={() =>
                   navigation.navigate('TrailDetail', {
                     trailId: item.id,
                     trailName: item.name,
                   })
                 }
-                activeOpacity={0.85}
-              >
-                <Text style={styles.title}>{item.name}</Text>
-                <Text style={styles.dim}>Difficulty: {item.difficulty || 'Unknown'}</Text>
-
-                {/* Category badges */}
-                <View style={styles.badgesRow}>
-                  {catIds.map((cid) => {
-                    const cat = categories.find((c) => c.id === cid);
-                    return cat ? (
-                      <View key={cid} style={styles.badge}>
-                        <Text style={styles.badgeText}>{cat.name}</Text>
-                      </View>
-                    ) : null;
-                  })}
-                </View>
-
-                {/* Scaled map preview (with Android-lite + half padding) */}
-                <TrailCardMap
-                  previewRegion={previewRegion}
-                  start={start}
-                  end={end}
-                  route={route}
-                  officialColor={officialColor}
-                />
-
-                <Text style={styles.dimSmall}>
-                  {route.length} points • {new Date().toLocaleDateString()}
-                </Text>
-              </TouchableOpacity>
+              />
             );
           }}
         />
@@ -192,52 +174,135 @@ export default function TrailList({ navigation }) {
   );
 }
 
-const TrailCardMap = memo(function TrailCardMap({ previewRegion, start, end, route, officialColor }) {
-  const mapRef = useRef(null);
-  const [mapReady, setMapReady] = useState(false);
+const TrailCard = memo(function TrailCard({ item, categories, catIds, officialColor, onPress }) {
+  const start = item.coords || null;
+  const end   = item.endCoords || null;
+  const route = Array.isArray(item.route) ? item.route : [];
 
-  // Auto-fit thumbnails with HALF padding = 12
-  useFitToGeometry({
-    mapRef,
-    route,
-    start,
-    end,
-    padding: 12,
-    animated: false,
-    minSpan: 0.0005,
-    debounceMs: 0,
-    enabled: mapReady,
-  });
+  const pointsForRegion = useMemo(
+    () => (route.length >= 2 ? route : [start, end].filter(Boolean)),
+    [route, start, end]
+  );
+
+  const previewRegion = useMemo(
+    () => regionFromPoints(pointsForRegion, { padRatio: 0.12, minSpanDeg: 0.002 }),
+    [pointsForRegion]
+  );
+
+  // Geometry-based version key → only regenerate snapshot when this changes
+  const mapVersion = useMemo(() => {
+    const s = start ? `${start.latitude.toFixed(5)},${start.longitude.toFixed(5)}` : '-';
+    const e = end   ? `${end.latitude.toFixed(5)},${end.longitude.toFixed(5)}`       : '-';
+    const rlen = route.length;
+    const rlast = rlen ? `${route[rlen-1].latitude.toFixed(5)},${route[rlen-1].longitude.toFixed(5)}` : '-';
+    return `${item.id}|${rlen}|${rlast}|${s}|${e}`;
+  }, [item.id, start, end, route]);
 
   return (
-    <View style={styles.previewWrap}>
-      <MapBase
-        ref={mapRef}
-        initialRegion={previewRegion}
-        tilesEnabled={false}
-        cacheEnabled
-        liteMode={Platform.OS === 'android'}
-        scrollEnabled={false}
-        zoomEnabled={false}
-        rotateEnabled={false}
-        pitchEnabled={false}
-        onMapReady={() => setMapReady(true)}
-        pointerEvents="none"
-        style={styles.previewMap}
-      >
-        {start && <Marker coordinate={start} title="Trailhead" />}
-        {end && <Marker coordinate={end} title="End" pinColor="green" />}
-        {route.length > 1 && (
-          <Polyline
-            coordinates={route.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
-            strokeWidth={3}
-            strokeColor={officialColor}
-          />
-        )}
-      </MapBase>
-    </View>
+    <TouchableOpacity style={styles.card} onPress={onPress} activeOpacity={0.85}>
+      <Text style={styles.title}>{item.name}</Text>
+      <Text style={styles.dim}>Difficulty: {item.difficulty || 'Unknown'}</Text>
+
+      {/* Category badges */}
+      <View style={styles.badgesRow}>
+        {catIds.map((cid) => {
+          const cat = categories.find((c) => c.id === cid);
+          return cat ? (
+            <View key={cid} style={styles.badge}>
+              <Text style={styles.badgeText}>{cat.name}</Text>
+            </View>
+          ) : null;
+        })}
+      </View>
+
+      <StaticThumbnail
+        region={previewRegion}
+        start={start}
+        end={end}
+        route={route}
+        strokeColor={officialColor}
+        mapVersion={mapVersion}
+      />
+
+      <Text style={styles.dimSmall}>
+        {route.length} points • {new Date().toLocaleDateString()}
+      </Text>
+    </TouchableOpacity>
   );
 });
+
+const StaticThumbnail = memo(function StaticThumbnail({ region, start, end, route, strokeColor, mapVersion }) {
+  const mapRef = useRef(null);
+  const [size, setSize] = useState(null);
+  const [loaded, setLoaded] = useState(false);     // onMapLoaded (tiles drawn)
+  const [uri, setUri] = useState(() => thumbCache.get(mapVersion) || null);
+
+  useEffect(() => {
+    if (thumbCache.has(mapVersion)) setUri(thumbCache.get(mapVersion));
+    else setUri(null);
+  }, [mapVersion]);
+
+  // Try snapshot after map reports loaded + we have layout.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (uri || !loaded || !size || !mapRef.current) return;
+      try {
+        // tiny delay helps ensure polylines/markers are actually painted
+        await new Promise(r => setTimeout(r, 120));
+        const snap = await mapRef.current.takeSnapshot({
+          width: Math.max(1, Math.round(size.width)),
+          height: Math.max(1, Math.round(size.height)),
+          format: 'png',
+          quality: 1,
+          result: 'file',
+        });
+        if (!cancelled && snap) {
+          thumbCache.set(mapVersion, snap);
+          setUri(snap);
+        }
+      } catch (e) {
+        console.warn('Thumbnail snapshot failed:', e?.message || e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [uri, loaded, size, mapVersion]);
+
+  return (
+    <View style={styles.previewWrap} onLayout={(e) => setSize(e.nativeEvent.layout)}>
+      {uri ? (
+        <Image source={{ uri }} style={styles.previewMap} resizeMode="cover" />
+      ) : (
+        <MapBase
+          ref={mapRef}
+          provider={PROVIDER_GOOGLE}
+          initialRegion={region}
+          tilesEnabled={false}
+          // Important: for the snapshot phase, avoid cacheEnabled (can show beige on some builds)
+          cacheEnabled={false}
+          liteMode={false}
+          scrollEnabled={false}
+          zoomEnabled={false}
+          rotateEnabled={false}
+          pitchEnabled={false}
+          pointerEvents="none"
+          style={styles.previewMap}
+          onMapLoaded={() => setLoaded(true)}
+        >
+          {start && <Marker coordinate={start} tracksViewChanges={false} />}
+          {end && <Marker coordinate={end} pinColor="green" tracksViewChanges={false} />}
+          {route.length > 1 && (
+            <Polyline
+              coordinates={route.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
+              strokeWidth={3}
+              strokeColor={strokeColor}
+            />
+          )}
+        </MapBase>
+      )}
+    </View>
+  );
+}, (prev, next) => prev.mapVersion === next.mapVersion);
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
