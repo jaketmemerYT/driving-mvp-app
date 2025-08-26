@@ -1,13 +1,9 @@
 // LeaderboardMarquee.js
-import React, { useEffect, useMemo, useRef, useState, useContext, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
-import { MaterialIcons } from '@expo/vector-icons';
-import axios from 'axios';
-import { API_BASE } from './config';
-import { UserContext } from './UserContext';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { View, Text, StyleSheet, FlatList, Image, TouchableOpacity, AppState } from 'react-native';
+import { useIsFocused } from '@react-navigation/native';
+import * as Haptics from 'expo-haptics';
 
-const medalFor = (rank) => (rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : `${rank}.`);
 const fmtDuration = (sec) => {
   if (sec == null) return '—';
   const s = Math.round(sec);
@@ -15,6 +11,7 @@ const fmtDuration = (sec) => {
   const r = s % 60;
   return m > 0 ? `${m}m ${r}s` : `${r}s`;
 };
+
 const mphFrom = (run) => {
   if (run?.distance && run?.duration) {
     const mps = run.distance / run.duration;
@@ -24,461 +21,312 @@ const mphFrom = (run) => {
   return 0;
 };
 
-/**
- * LeaderboardMarquee
- * Props:
- * - dwellMs?: number (if omitted, we read from prefs.leaderboardDwellMs or fallback 4000)
- * - maxRows?: number = 5
- * - pauseOnPress?: boolean = true
- * - skipEmptyTrails?: boolean = true  // auto-skip trails with 0 runs
- */
+const medalFor = (rank) => (['🥇','🥈','🥉'][rank - 1] || `${rank}.`);
+
 export default function LeaderboardMarquee({
-  dwellMs,
-  maxRows = 5,
-  pauseOnPress = true,
-  skipEmptyTrails = true,
+  trails = [],
+  routes = [],
+  users = [],
+  vehicles = [],
+  selectedTrailId,                // optional: controlled selection from parent (chips)
+  onSelectedTrailIdChange,        // optional callback when marquee cycles
+  cycleMs = 4000,
+  autoplay = true,
+  highlightUserId = null,
+  onRowPress,                     // ({ run, trail }) => void
+  onTrailPress,                   // (trail) => void
 }) {
-  const navigation = useNavigation();
-  const { user, prefs, setPrefs, updatePrefs } = useContext(UserContext);
+  const isFocused = useIsFocused();
 
-  // base datasets
-  const [trails, setTrails] = useState([]);
-  const [routes, setRoutes] = useState([]);
-  const [users, setUsers] = useState([]);
-  const [vehicles, setVehicles] = useState([]);
-
-  // marquee state
-  const [index, setIndex] = useState(0);
-  const [paused, setPaused] = useState(false);
-
-  // initial dwell comes from props -> prefs -> default
-  const initialDwell = useMemo(() => {
-    if (typeof dwellMs === 'number') return Math.max(0, dwellMs);
-    const saved = Number(prefs?.leaderboardDwellMs);
-    return Number.isFinite(saved) ? Math.max(0, saved) : 4000;
-  }, [dwellMs, prefs?.leaderboardDwellMs]);
-
-  const [dwellMsState, setDwellMsState] = useState(initialDwell);
-
-  // cache: per-trail leaderboard
-  const [leadersByTrail, setLeadersByTrail] = useState({});
-  const [loadingTrailId, setLoadingTrailId] = useState(null);
-
-  const timerRef = useRef(null);
-  const mountedRef = useRef(true);
-
-  // load base sets once
+  // App foreground detection
+  const [appIsActive, setAppIsActive] = useState(AppState.currentState === 'active');
   useEffect(() => {
-    mountedRef.current = true;
-    (async () => {
-      try {
-        const [tRes, rRes, uRes, vRes] = await Promise.all([
-          axios.get(`${API_BASE}/api/trailheads`),
-          axios.get(`${API_BASE}/api/routes`),
-          axios.get(`${API_BASE}/api/users`),
-          axios.get(`${API_BASE}/api/vehicles`),
-        ]);
-        if (!mountedRef.current) return;
-        setTrails(Array.isArray(tRes.data) ? tRes.data : []);
-        setRoutes(Array.isArray(rRes.data) ? rRes.data : []);
-        setUsers(Array.isArray(uRes.data) ? uRes.data : []);
-        setVehicles(Array.isArray(vRes.data) ? vRes.data : []);
-      } catch (e) {
-        console.error('LeaderboardMarquee base load failed:', e?.message || e);
-        if (!mountedRef.current) return;
-        setTrails([]); setRoutes([]); setUsers([]); setVehicles([]);
-      }
-    })();
-    return () => { mountedRef.current = false; clearInterval(timerRef.current); };
+    const sub = AppState.addEventListener('change', (s) => setAppIsActive(s === 'active'));
+    return () => sub.remove();
   }, []);
 
-  // --------- build cyclable list based on run counts ----------
-  const runCounts = useMemo(() => {
-    const m = {};
-    (routes || []).forEach(r => {
-      if (r?.trailId) m[r.trailId] = (m[r.trailId] || 0) + 1;
+  // Build “eligible” trail list for auto-cycle (has >=1 run)
+  const trailsWithRuns = useMemo(() => {
+    const byTrail = new Map();
+    routes.forEach(r => {
+      byTrail.set(r.trailId, (byTrail.get(r.trailId) || 0) + 1);
     });
-    return m;
-  }, [routes]);
+    return trails.filter(t => (byTrail.get(t.id) || 0) > 0);
+  }, [trails, routes]);
 
-  const cyclableTrails = useMemo(() => {
-    if (!Array.isArray(trails) || trails.length === 0) return [];
-    if (!skipEmptyTrails) return trails;
-    const withRuns = trails.filter(t => (runCounts[t.id] || 0) > 0);
-    return withRuns.length ? withRuns : trails; // fallback when none have runs
-  }, [trails, runCounts, skipEmptyTrails]);
-
-  // keep index valid when the list size changes
-  const totalTrails = cyclableTrails.length;
-  useEffect(() => {
-    if (totalTrails > 0 && index >= totalTrails) {
-      setIndex(0);
+  // If selectedTrailId is not provided, maintain our own index; else mirror the parent’s selection
+  const [internalIndex, setInternalIndex] = useState(0);
+  const effectiveTrail = useMemo(() => {
+    if (selectedTrailId) {
+      return trails.find(t => t.id === selectedTrailId) || null;
     }
-  }, [totalTrails, index]);
+    return trailsWithRuns.length
+      ? trailsWithRuns[internalIndex % trailsWithRuns.length]
+      : (trails[0] || null);
+  }, [selectedTrailId, trails, trailsWithRuns, internalIndex]);
 
-  const activeTrail = totalTrails > 0 ? cyclableTrails[index % totalTrails] : null;
-  const totalRunsForActive = useMemo(() => {
-    if (!activeTrail) return 0;
-    return runCounts[activeTrail.id] || 0;
-  }, [runCounts, activeTrail]);
+  // --- Auto-cycle with focus + foreground + cleanup
+  const timerRef = useRef(null);
+  const lastBuzzAtRef = useRef(0);
 
-  // autoplay
   useEffect(() => {
-    if (!totalTrails) return;
-    clearInterval(timerRef.current);
-    if (paused || dwellMsState === 0) return; // 0 = no auto-advance
+    const canRun = autoplay && cycleMs > 0 && trailsWithRuns.length > 1 && isFocused && appIsActive;
+
+    // clear any existing
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    if (!canRun) return;
+
     timerRef.current = setInterval(() => {
-      setIndex((i) => (i + 1) % totalTrails);
-    }, Math.max(1000, dwellMsState));
-    return () => clearInterval(timerRef.current);
-  }, [totalTrails, dwellMsState, paused]);
-
-  // fetch leaderboard for current & prefetch next
-  const ensureLeaderboard = useCallback(async (trailId) => {
-    if (!trailId) return;
-    if (leadersByTrail[trailId]) return;
-    try {
-      setLoadingTrailId(trailId);
-      const res = await axios.get(`${API_BASE}/api/leaderboard/${trailId}`);
-      if (!mountedRef.current) return;
-      setLeadersByTrail((prev) => ({ ...prev, [trailId]: Array.isArray(res.data) ? res.data : [] }));
-    } catch (e) {
-      console.error('leaderboard fetch failed:', e?.message || e);
-      if (!mountedRef.current) return;
-      setLeadersByTrail((prev) => ({ ...prev, [trailId]: [] }));
-    } finally {
-      if (mountedRef.current) setLoadingTrailId((id) => (id === trailId ? null : id));
-    }
-  }, [leadersByTrail]);
-
-  useEffect(() => {
-    if (!activeTrail?.id) return;
-    ensureLeaderboard(activeTrail.id);
-    if (totalTrails > 1) {
-      const next = cyclableTrails[(index + 1) % totalTrails];
-      if (next?.id) ensureLeaderboard(next.id);
-    }
-  }, [activeTrail?.id, index, totalTrails, cyclableTrails, ensureLeaderboard]);
-
-  const leaders = activeTrail ? (leadersByTrail[activeTrail.id] || []) : [];
-  const topRows = leaders.slice(0, Math.max(1, maxRows));
-
-  // helpers
-  const userName = useCallback((uid) => users.find(u => u.id === uid)?.name || 'Unknown User', [users]);
-  const vehicleLabel = useCallback((vid) => {
-    const v = vehicles.find(x => x.id === vid);
-    return v ? `${v.make} ${v.model}${v.year ? ` (${v.year})` : ''}` : 'Unknown Vehicle';
-  }, [vehicles]);
-
-  // persist dwell to prefs
-  const persistDwell = useCallback(async (val) => {
-    try {
-      if (typeof setPrefs === 'function') setPrefs({ ...(prefs || {}), leaderboardDwellMs: val });
-      if (typeof updatePrefs === 'function') {
-        await updatePrefs({ leaderboardDwellMs: val });
-      } else if (user?.id) {
-        await axios
-          .patch(`${API_BASE}/api/users/${user.id}/prefs`, { leaderboardDwellMs: val })
-          .catch(() => axios.post(`${API_BASE}/api/users/${user.id}/prefs`, { leaderboardDwellMs: val }).catch(() => {}));
+      if (selectedTrailId) {
+        // Controlled mode: compute next from current selectedTrailId
+        const idx = Math.max(0, trailsWithRuns.findIndex(t => t.id === selectedTrailId));
+        const next = trailsWithRuns[(idx + 1) % trailsWithRuns.length];
+        onSelectedTrailIdChange?.(next.id);
+      } else {
+        // Uncontrolled mode: bump our local index
+        setInternalIndex((prev) => (prev + 1) % trailsWithRuns.length);
       }
-    } catch (e) {
-      console.warn('Persist dwell failed:', e?.message || e);
-    }
-  }, [prefs, setPrefs, updatePrefs, user?.id]);
 
-  // --- stack-safe deep link helpers ---
-  const openTrailDetail = useCallback(() => {
-    if (!activeTrail) return;
-    // Step 1: ensure TrailList is active in its stack
-    navigation.navigate('TrailsTab', { screen: 'TrailList' });
-    // Step 2: push TrailDetail so Back goes to TrailList
-    setTimeout(() => {
-      navigation.navigate('TrailsTab', {
-        screen: 'TrailDetail',
-        params: { trailId: activeTrail.id, trailName: activeTrail.name },
-      });
-    }, 0);
-  }, [navigation, activeTrail]);
+      // Haptic (throttled)
+      const now = Date.now();
+      if (now - lastBuzzAtRef.current > 700) {
+        lastBuzzAtRef.current = now;
+        try {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        } catch {}
+      }
+    }, cycleMs);
 
-  const openRunDetail = useCallback((row) => {
-    if (!activeTrail || !row) return;
-    // Step 1: ensure RunList is active in its stack
-    navigation.navigate('RunsTab', { screen: 'RunList' });
-    // Step 2: push RunDetail so Back goes to RunList
-    setTimeout(() => {
-      navigation.navigate('RunsTab', {
-        screen: 'RunDetail',
-        params: { run: row, trailName: activeTrail.name },
-      });
-    }, 0);
-  }, [navigation, activeTrail]);
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [
+    autoplay,
+    cycleMs,
+    isFocused,
+    appIsActive,
+    trailsWithRuns,               // safe: recreated only when list changes
+    selectedTrailId,
+    onSelectedTrailIdChange
+  ]);
 
-  // UI
-  if (!activeTrail) {
+  const top5 = useMemo(() => {
+    if (!effectiveTrail) return [];
+    return routes
+      .filter(r => r.trailId === effectiveTrail.id)
+      .sort((a, b) => a.duration - b.duration)
+      .slice(0, 5);
+  }, [routes, effectiveTrail]);
+
+  // Pad to 5 rows for stable height
+  const rows = useMemo(() => {
+    const padded = [...top5];
+    while (padded.length < 5) padded.push({ id: `placeholder-${padded.length}` });
+    return padded;
+  }, [top5]);
+
+  const userName = useCallback(
+    (uid) => users.find(u => u.id === uid)?.name || 'Unknown',
+    [users]
+  );
+  const vehicleLabel = useCallback(
+    (vid) => {
+      const v = vehicles.find(x => x.id === vid);
+      return v ? `${v.make} ${v.model}${v.year ? ` (${v.year})` : ''}` : 'Vehicle';
+    },
+    [vehicles]
+  );
+  const topVehiclePhoto = useMemo(() => {
+    const top = top5[0];
+    if (!top) return null;
+    const v = vehicles.find(x => x.id === top.vehicleId);
+    return v?.photoUrl || null;
+  }, [vehicles, top5]);
+
+  const keyExtractor = (item, index) => item.id || `row-${index}`;
+
+  const Hero = () => {
+    const r = rows[0];
+    const isPlaceholder = !r?.userId;
+    const mph = r ? mphFrom(r) : 0;
+    const dateStr = r?.timestamp ? new Date(r.timestamp).toLocaleDateString() : '';
+
     return (
-      <View style={styles.skeleton}>
-        <ActivityIndicator size="large" />
-      </View>
-    );
-  }
-
-  const header = (
-    <View style={styles.headerCard}>
-      <View style={styles.headerTopRow}>
-        {/* Trail title → TrailDetail (stack-safe) */}
-        <TouchableOpacity onPress={openTrailDetail} activeOpacity={0.7}>
-          <Text style={styles.trailName}>{activeTrail.name}</Text>
-        </TouchableOpacity>
-
-        {/* Controls: play/pause + page badge */}
-        <View style={styles.controlsCluster}>
-          <TouchableOpacity
-            onPress={() => setPaused(p => !p)}
-            style={styles.iconBtn}
-            hitSlop={{ top: 8, left: 8, right: 8, bottom: 8 }}
-            activeOpacity={0.7}
-          >
-            <MaterialIcons name={paused || dwellMsState === 0 ? 'play-arrow' : 'pause'} size={18} color="#FFF" />
-          </TouchableOpacity>
-          <Text style={styles.pageBadge}>{index + 1}/{totalTrails}</Text>
-        </View>
-      </View>
-
-      <View style={styles.metaRow}>
-        <View style={styles.metaPill}>
-          <Text style={styles.metaPillText}>
-            {totalRunsForActive} total run{totalRunsForActive === 1 ? '' : 's'}
-          </Text>
-        </View>
-        {activeTrail.difficulty ? (
-          <View style={[styles.metaPill, styles.diffPill]}>
-            <Text style={[styles.metaPillText, styles.diffPillText]}>{activeTrail.difficulty}</Text>
-          </View>
-        ) : null}
-      </View>
-
-      {/* dwell time chips (includes Off = no autoplay) */}
-      <View style={styles.dwellRow}>
-        {[
-          { label: 'Off', val: 0 },
-          { label: '2s',  val: 2000 },
-          { label: '4s',  val: 4000 },
-          { label: '8s',  val: 8000 },
-        ].map(opt => {
-          const sel = dwellMsState === opt.val;
-          return (
-            <TouchableOpacity
-              key={opt.val}
-              style={[styles.dwellChip, sel && styles.dwellChipSelected]}
-              onPress={() => { setDwellMsState(opt.val); persistDwell(opt.val); setPaused(false); }}
-              activeOpacity={0.7}
-            >
-              <Text style={[styles.dwellChipText, sel && styles.dwellChipTextSelected]}>{opt.label}</Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
-    </View>
-  );
-
-  const panelBody = (
-    <>
-      {topRows.map((row, idx) => {
-        const rank = idx + 1;
-        const mph = mphFrom(row);
-        const dateStr = row.timestamp ? new Date(row.timestamp).toLocaleDateString() : '';
-        const isTop = rank <= 3;
-        const isMe = user?.id && row.userId === user.id;
-
-        return (
-          <TouchableOpacity
-            key={row.id || `${activeTrail.id}-${rank}`}
-            style={[styles.row, isTop && styles.rowTop, isMe && styles.rowMe]}
-            activeOpacity={0.75}
-            onPress={() => openRunDetail(row)}   // ← stack-safe deep link
-          >
-            <View style={styles.rankCol}>
-              <Text style={styles.medal}>{medalFor(rank)}</Text>
-            </View>
-            <View style={styles.mainCol}>
-              <Text style={[styles.userLine, isMe && styles.meText]}>
-                {(users.find(u => u.id === row.userId)?.name || 'Unknown User')}
-                <Text style={styles.sep}> • </Text>
-                {(() => {
-                  const v = vehicles.find(x => x.id === row.vehicleId);
-                  return v ? `${v.make} ${v.model}${v.year ? ` (${v.year})` : ''}` : 'Unknown Vehicle';
-                })()}
-              </Text>
-              <View style={styles.metricsRow}>
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Time</Text>
-                  <Text style={styles.metricValue}>{fmtDuration(row.duration)}</Text>
-                </View>
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Avg</Text>
-                  <Text style={styles.metricValue}>{mph.toFixed(1)} mph</Text>
-                </View>
-                {row.distance != null && (
-                  <View style={styles.metric}>
-                    <Text style={styles.metricLabel}>Dist</Text>
-                    <Text style={styles.metricValue}>{(row.distance / 1609.344).toFixed(2)} mi</Text>
-                  </View>
-                )}
-                {dateStr ? (
-                  <View style={styles.metric}>
-                    <Text style={styles.metricLabel}>Date</Text>
-                    <Text style={styles.metricValue}>{dateStr}</Text>
-                  </View>
-                ) : null}
-              </View>
-            </View>
-          </TouchableOpacity>
-        );
-      })}
-    </>
-  );
-
-  return (
-    <View style={styles.wrap}>
-      {/* tap panel background to pause/resume autoplay (optional) */}
       <TouchableOpacity
-        activeOpacity={pauseOnPress ? 0.92 : 1}
-        onPress={() => pauseOnPress && setPaused(p => !p)}
+        activeOpacity={isPlaceholder ? 1 : 0.8}
+        onPress={() => !isPlaceholder && onRowPress?.({ run: r, trail: effectiveTrail })}
+        style={[styles.hero, isPlaceholder && styles.heroPlaceholder]}
       >
-        {header}
-        <View style={styles.panel}>
-          {loadingTrailId === activeTrail.id && !leadersByTrail[activeTrail.id] ? (
-            <View style={styles.center}><ActivityIndicator size="large" /></View>
-          ) : topRows.length === 0 ? (
-            <View style={styles.emptyWrap}><Text style={styles.empty}>No runs yet for this trail.</Text></View>
+        <View style={styles.heroPhotoWrap}>
+          {topVehiclePhoto ? (
+            <Image source={{ uri: topVehiclePhoto }} style={styles.heroPhoto} resizeMode="cover" />
           ) : (
-            panelBody
+            <View style={[styles.heroPhoto, styles.heroPhotoEmpty]}>
+              <Text style={styles.photoEmptyTxt}>No Photo</Text>
+            </View>
           )}
+          <View style={styles.medalBadge}>
+            <Text style={styles.medalTxt}>🥇</Text>
+          </View>
+        </View>
+        <View style={styles.heroMeta}>
+          <Text style={styles.heroTitle} numberOfLines={1}>
+            {effectiveTrail?.name || 'Trail'}
+          </Text>
+          <Text style={styles.heroUser} numberOfLines={1}>
+            {isPlaceholder ? '—' : `${userName(r.userId)} • ${vehicleLabel(r.vehicleId)}`}
+          </Text>
+          <View style={styles.heroMetrics}>
+            <Text style={styles.heroMetric}>
+              {isPlaceholder ? '—' : fmtDuration(r.duration)}
+            </Text>
+            <Text style={styles.heroDot}>•</Text>
+            <Text style={styles.heroMetric}>
+              {isPlaceholder ? '—' : `${mph.toFixed(1)} mph`}
+            </Text>
+            {dateStr ? (
+              <>
+                <Text style={styles.heroDot}>•</Text>
+                <Text style={styles.heroMetric}>{dateStr}</Text>
+              </>
+            ) : null}
+          </View>
         </View>
       </TouchableOpacity>
+    );
+  };
 
-      {/* dots */}
-      <View style={styles.dotsRow}>
-        {cyclableTrails.map((t, i) => (
-          <View key={t.id} style={[styles.dot, i === index ? styles.dotActive : null]} />
-        ))}
-      </View>
+  const renderRow = ({ item, index }) => {
+    const rank = index + 1;
+    const isPlaceholder = !item?.userId;
+    const mph = mphFrom(item);
+    const isHighlighted = !!highlightUserId && item.userId === highlightUserId;
 
-      {/* quick trail chips */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.trailChipsScroll}
-        contentContainerStyle={styles.trailChips}
+    return (
+      <TouchableOpacity
+        activeOpacity={isPlaceholder ? 1 : 0.8}
+        onPress={() => !isPlaceholder && onRowPress?.({ run: item, trail: effectiveTrail })}
+        style={[
+          styles.row,
+          rank <= 3 && styles.rowTop,
+          isHighlighted && styles.rowHighlight,
+        ]}
       >
-        {cyclableTrails.map((t, i) => {
-          const selected = i === index;
-          return (
-            <TouchableOpacity
-              key={t.id}
-              style={[styles.trailChip, selected && styles.trailChipSelected]}
-              onPress={() => setIndex(i)}
-              activeOpacity={0.7}
-            >
-              <Text style={[styles.trailChipText, selected && styles.trailChipTextSelected]}>
-                {t.name}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-      </ScrollView>
+        <View style={styles.rankCol}>
+          <Text style={styles.rankTxt}>{medalFor(rank)}</Text>
+        </View>
+        <View style={styles.mainCol}>
+          <Text style={styles.userLine} numberOfLines={1}>
+            {isPlaceholder ? '—' : `${userName(item.userId)} • ${vehicleLabel(item.vehicleId)}`}
+          </Text>
+          <View style={styles.metricsRow}>
+            <Text style={styles.metric}>
+              {isPlaceholder ? '—' : fmtDuration(item.duration)}
+            </Text>
+            <Text style={styles.dot}>•</Text>
+            <Text style={styles.metric}>
+              {isPlaceholder ? '—' : `${mph.toFixed(1)} mph`}
+            </Text>
+          </View>
+        </View>
+        <View style={styles.ctaCol}>
+          {!isPlaceholder && <Text style={styles.linkBtnTxt}>View</Text>}
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
+  return (
+    <View style={styles.card}>
+      {/* Trail title as a link */}
+      <TouchableOpacity onPress={() => effectiveTrail && onTrailPress?.(effectiveTrail)} activeOpacity={0.8}>
+        <Text style={styles.cardTitle}>
+          {effectiveTrail?.name || 'Leaderboard'}
+        </Text>
+      </TouchableOpacity>
+
+      {/* Hero */}
+      <Hero />
+
+      {/* Top 5 (fixed height via always 5 rows) */}
+      <FlatList
+        data={rows}
+        keyExtractor={keyExtractor}
+        renderItem={renderRow}
+        scrollEnabled={false}
+        ItemSeparatorComponent={() => <View style={styles.sep} />}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  wrap: { padding: 12 },
-
-  headerCard: {
-    backgroundColor: '#0F172A',
-    borderRadius: 12,
+  card: {
+    marginHorizontal: 12,
+    marginTop: 8,
+    marginBottom: 6,
     padding: 12,
-    marginBottom: 8,
-  },
-  headerTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  trailName: { color: '#FFF', fontSize: 18, fontWeight: '700' },
-
-  controlsCluster: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  iconBtn: {
-    width: 30, height: 30, borderRadius: 15,
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: '#111827',
-    marginRight: 6,
-  },
-  pageBadge: {
-    color: '#FFF',
-    backgroundColor: '#111827',
-    paddingHorizontal: 10, paddingVertical: 4,
-    borderRadius: 999, fontSize: 12, fontWeight: '700',
-  },
-
-  metaRow: { flexDirection: 'row', marginTop: 8 },
-  metaPill: {
-    backgroundColor: '#1F2937',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
     borderRadius: 12,
-    marginRight: 8,
+    backgroundColor: '#0F172A',
   },
-  metaPillText: { color: '#E5E7EB', fontSize: 12, fontWeight: '600' },
-  diffPill: { backgroundColor: '#111827' },
-  diffPillText: { color: '#FACC15' },
+  cardTitle: { color: '#FFF', fontSize: 18, fontWeight: '700' },
 
-  dwellRow: { flexDirection: 'row', marginTop: 10, flexWrap: 'wrap' },
-  dwellChip: {
-    paddingHorizontal: 10, paddingVertical: 6,
-    backgroundColor: '#1F2937',
-    borderRadius: 999, marginRight: 8, marginTop: 6,
+  // Hero
+  hero: {
+    marginTop: 10,
+    flexDirection: 'row',
+    backgroundColor: '#111827',
+    borderRadius: 12,
+    padding: 10,
+    alignItems: 'center',
   },
-  dwellChipSelected: { backgroundColor: '#2563EB' },
-  dwellChipText: { color: '#E5E7EB', fontSize: 12, fontWeight: '700' },
-  dwellChipTextSelected: { color: '#FFF' },
+  heroPlaceholder: { opacity: 0.85 },
+  heroPhotoWrap: { width: 92, height: 68, marginRight: 10 },
+  heroPhoto: { width: '100%', height: '100%', borderRadius: 8, backgroundColor: '#0B1220' },
+  heroPhotoEmpty: {
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: '#1F2937',
+  },
+  photoEmptyTxt: { color: '#9CA3AF', fontSize: 12 },
+  medalBadge: {
+    position: 'absolute', top: -8, left: -8, backgroundColor: '#0F172A',
+    borderRadius: 12, paddingHorizontal: 6, paddingVertical: 2,
+  },
+  medalTxt: { fontSize: 16 },
 
-  panel: { backgroundColor: '#FFF', borderRadius: 12, padding: 8, elevation: 1 },
+  heroMeta: { flex: 1, minWidth: 0 },
+  heroTitle: { color: '#FFF', fontSize: 16, fontWeight: '700' },
+  heroUser: { color: '#D1D5DB', marginTop: 2 },
+  heroMetrics: { flexDirection: 'row', marginTop: 6, alignItems: 'center' },
+  heroMetric: { color: '#E5E7EB', fontWeight: '600' },
+  heroDot: { color: '#6B7280', marginHorizontal: 6 },
+
+  // Rows
+  sep: { height: 8 },
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderColor: '#EEE',
+    backgroundColor: '#111827',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
   },
-  rowTop: { backgroundColor: '#FFFDF5' },
-  rowMe: { backgroundColor: '#ECFDF5' },
-  rankCol: { width: 42, alignItems: 'center' },
-  medal: { fontSize: 20 },
-  mainCol: { flex: 1, paddingRight: 8 },
-  userLine: { fontSize: 15, fontWeight: '600', color: '#111' },
-  meText: { color: '#065F46' },
-  sep: { color: '#999' },
-  metricsRow: { flexDirection: 'row', marginTop: 6, flexWrap: 'wrap' },
-  metric: { marginRight: 12, marginTop: 4 },
-  metricLabel: { fontSize: 11, color: '#6B7280' },
-  metricValue: { fontSize: 14, fontWeight: '700', color: '#111' },
+  rowTop: { backgroundColor: '#11161F' },
+  rowHighlight: { borderWidth: 1, borderColor: '#6366F1' },
 
-  dotsRow: { flexDirection: 'row', justifyContent: 'center', marginTop: 8, marginBottom: 2 },
-  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#DDD', marginHorizontal: 3 },
-  dotActive: { backgroundColor: '#111' },
-
-  trailChipsScroll: { maxHeight: 48 },
-  trailChips: { paddingHorizontal: 4, paddingVertical: 8 },
-  trailChip: {
-    paddingHorizontal: 12, paddingVertical: 8,
-    backgroundColor: '#EEE',
-    borderRadius: 16, marginRight: 8,
-  },
-  trailChipSelected: { backgroundColor: '#007AFF' },
-  trailChipText: { color: '#333', fontWeight: '500' },
-  trailChipTextSelected: { color: '#FFF' },
-
-  center: { paddingVertical: 24, alignItems: 'center' },
-  emptyWrap: { paddingVertical: 16, alignItems: 'center' },
-  empty: { color: '#6B7280' },
-
-  skeleton: { padding: 24, alignItems: 'center', justifyContent: 'center' },
+  rankCol: { width: 36, alignItems: 'center' },
+  rankTxt: { fontSize: 18, color: '#FDE68A' },
+  mainCol: { flex: 1, paddingRight: 8, minWidth: 0 },
+  userLine: { color: '#F9FAFB', fontWeight: '600' },
+  metricsRow: { flexDirection: 'row', marginTop: 4, alignItems: 'center' },
+  metric: { color: '#E5E7EB' },
+  dot: { color: '#6B7280', marginHorizontal: 6 },
+  ctaCol: { paddingLeft: 6 },
+  linkBtnTxt: { color: '#D1D5DB', fontWeight: '600' },
 });
