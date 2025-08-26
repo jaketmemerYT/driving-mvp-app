@@ -1,14 +1,12 @@
 // TrailDetail.js
-import React, { useState, useEffect, useLayoutEffect, useRef, useContext } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { View, Alert, Button, ActivityIndicator, StyleSheet, Text } from 'react-native';
 import { Marker, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import axios from 'axios';
-
 import MapBase from './MapBase';
 import { API_BASE } from './config';
-import { UserContext } from './UserContext';
-import { useFitToGeometry } from './hooks/useFitToGeometry';
+import { useRouteColors } from './useRouteColors';
 
 // Haversine (meters)
 function distanceMeters(a, b) {
@@ -25,23 +23,19 @@ function distanceMeters(a, b) {
 }
 
 export default function TrailDetail({ route, navigation }) {
-  const { prefs } = useContext(UserContext);
+  const { officialColor } = useRouteColors();
   const { trailId, trailName } = route.params;
 
   const [trail, setTrail] = useState(null);
   const [loading, setLoading] = useState(true);
   const [arrived, setArrived] = useState(false);
-  const [mapReady, setMapReady] = useState(false);
   const watcher = useRef(null);
   const mapRef = useRef(null);
-
-  const officialColor = prefs?.officialRouteColor || '#000000';
 
   useLayoutEffect(() => {
     navigation.setOptions({ title: trailName || 'Trail' });
   }, [navigation, trailName]);
 
-  // Load the trail
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -53,12 +47,9 @@ export default function TrailDetail({ route, navigation }) {
       })
       .catch((e) => console.error(e))
       .finally(() => active && setLoading(false));
-    return () => {
-      active = false;
-    };
+    return () => { active = false; };
   }, [trailId]);
 
-  // Arrival watcher (only until first arrival)
   useEffect(() => {
     let mounted = true;
     if (!trail?.coords || arrived) return;
@@ -67,7 +58,6 @@ export default function TrailDetail({ route, navigation }) {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (!mounted || status !== 'granted') return;
 
-      // Clear any previous watcher
       try { watcher.current?.remove?.(); } catch {}
       watcher.current = await Location.watchPositionAsync(
         { accuracy: Location.Accuracy.High, distanceInterval: 1 },
@@ -91,25 +81,36 @@ export default function TrailDetail({ route, navigation }) {
     };
   }, [trail?.coords, arrived]);
 
-  // ---- Compute geometry safely for ALL renders (so hooks stay in fixed order)
-  const startCoords = trail?.coords ?? null;
-  const endCoords   = trail?.endCoords ?? null;
-  const officialRoute = Array.isArray(trail?.route) ? trail.route : [];
+  const initialRegion = useMemo(() => {
+    const start = trail?.coords;
+    if (start) {
+      return {
+        latitude: start.latitude,
+        longitude: start.longitude,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
+      };
+    }
+    return { latitude: 37.7749, longitude: -122.4194, latitudeDelta: 0.2, longitudeDelta: 0.2 };
+  }, [trail?.coords]);
 
-  // Standardized auto-fit (always called; gated by `enabled`)
-  useFitToGeometry({
-    mapRef,
-    route: officialRoute,
-    start: startCoords,
-    end: endCoords,
-    padding: { top: 60, right: 60, bottom: 60, left: 60 },
-    animated: true,
-    minSpan: 0.0005,
-    debounceMs: 0,
-    enabled: mapReady && !!startCoords, // only tries to fit when map + data are ready
-  });
+  const allFitCoords = useMemo(() => {
+    const pts = [];
+    if (trail?.route?.length) trail.route.forEach(p => pts.push({ latitude: p.latitude, longitude: p.longitude }));
+    if (trail?.coords) pts.push(trail.coords);
+    if (trail?.endCoords) pts.push(trail.endCoords);
+    return pts;
+  }, [trail?.route, trail?.coords, trail?.endCoords]);
 
-  if (loading || !startCoords) {
+  const onMapLayout = useCallback(() => {
+    if (!mapRef.current || allFitCoords.length < 2) return;
+    mapRef.current.fitToCoordinates(allFitCoords, {
+      edgePadding: { top: 24, right: 24, bottom: 24, left: 24 },
+      animated: false,
+    });
+  }, [allFitCoords]);
+
+  if (loading || !trail?.coords) {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" />
@@ -117,40 +118,26 @@ export default function TrailDetail({ route, navigation }) {
     );
   }
 
+  const { coords: startCoords, endCoords, route: officialRoute = [] } = trail;
+
   return (
     <View style={styles.container}>
-      <View style={styles.mapWrap}>
-        <MapBase
-          ref={mapRef}
-          initialRegion={{
-            latitude: startCoords.latitude,
-            longitude: startCoords.longitude,
-            latitudeDelta: 0.01,
-            longitudeDelta: 0.01,
-          }}
-          onMapReady={() => setMapReady(true)}
-        >
-          <Marker coordinate={startCoords} title={trail.name} />
-          {endCoords && <Marker coordinate={endCoords} title="Trail End" pinColor="green" />}
+      <MapBase ref={mapRef} style={styles.map} initialRegion={initialRegion} onLayout={onMapLayout}>
+        <Marker coordinate={startCoords} title={trail.name} />
+        {endCoords && <Marker coordinate={endCoords} title="Trail End" pinColor="green" />}
 
-          {officialRoute.length > 1 && (
-            <Polyline
-              coordinates={officialRoute.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
-              strokeWidth={4}
-              strokeColor={officialColor}
-            />
-          )}
-        </MapBase>
-      </View>
+        {officialRoute.length > 1 && (
+          <Polyline
+            coordinates={officialRoute.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
+            strokeWidth={4}
+            strokeColor={officialColor}
+          />
+        )}
+      </MapBase>
 
       <View style={styles.footer}>
         {!arrived ? (
-          <Button
-            title="Navigate to Trailhead"
-            onPress={() => {
-              // TODO: deeplink into Apple/Google Maps with startCoords
-            }}
-          />
+          <Button title="Navigate to Trailhead" onPress={() => { /* optional deeplink */ }} />
         ) : (
           <Button
             title="Start Run"
@@ -174,9 +161,9 @@ export default function TrailDetail({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#FFF' },
+  container: { flex: 1 },
+  map: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  mapWrap: { flex: 1 },
   footer: { padding: 12, gap: 8 },
   meta: { color: '#666', textAlign: 'center' },
 });

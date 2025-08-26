@@ -1,12 +1,5 @@
 // AddTrail.js
-import React, {
-  useState,
-  useRef,
-  useLayoutEffect,
-  useEffect,
-  useContext,
-  useMemo,
-} from 'react';
+import React, { useState, useRef, useLayoutEffect, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -22,8 +15,7 @@ import axios from 'axios';
 
 import MapBase from './MapBase';
 import { API_BASE } from './config';
-import { UserContext } from './UserContext';
-import { useFitToGeometry } from './hooks/useFitToGeometry';
+import { useRouteColors } from './useRouteColors';
 
 // Simple haversine in meters for live stats
 function distanceMeters(a, b) {
@@ -40,7 +32,7 @@ function distanceMeters(a, b) {
 }
 
 export default function AddTrail({ navigation }) {
-  const { prefs } = useContext(UserContext);
+  const { officialColor } = useRouteColors();
 
   // Inputs
   const [name, setName] = useState('');
@@ -48,8 +40,8 @@ export default function AddTrail({ navigation }) {
 
   // Geo state
   const [startCoords, setStartCoords] = useState(null);
-  const [endCoords, setEndCoords] = useState(null);
-  const [route, setRoute] = useState([]); // array of rich points
+  const [endCoords, setEndCoords] = useState(null);  // <-- fixed
+  const [route, setRoute] = useState([]);            // array of rich points
   const [region, setRegion] = useState(null);
 
   // Recording state
@@ -57,10 +49,6 @@ export default function AddTrail({ navigation }) {
   const watchRef = useRef(null);
   const mapRef = useRef(null);
 
-  // Colors from user preferences (with fallbacks)
-  const officialColor = prefs?.officialRouteColor || '#000000';
-
-  // Header title
   useLayoutEffect(() => {
     navigation.setOptions({ title: 'New Trail' });
   }, [navigation]);
@@ -77,9 +65,7 @@ export default function AddTrail({ navigation }) {
           return;
         }
 
-        const loc = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.High,
-        });
+        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
         if (!mounted || !loc?.coords) return;
 
         const c = loc.coords;
@@ -108,14 +94,11 @@ export default function AddTrail({ navigation }) {
     })();
     return () => {
       mounted = false;
-      try {
-        watchRef.current?.remove?.();
-      } catch {}
+      try { watchRef.current?.remove?.(); } catch {}
       watchRef.current = null;
     };
   }, []);
 
-  // Tap map to set an endpoint (only when not recording)
   const onMapPress = (e) => {
     if (recording) return;
     const { coordinate } = e.nativeEvent || {};
@@ -123,7 +106,6 @@ export default function AddTrail({ navigation }) {
     setEndCoords({ latitude: coordinate.latitude, longitude: coordinate.longitude });
   };
 
-  // Live stats while recording
   const liveStats = useMemo(() => {
     if (route.length < 2) {
       return { distance: 0, duration: 0, avgSpeed: 0, minSpeed: 0, maxSpeed: 0 };
@@ -189,7 +171,7 @@ export default function AddTrail({ navigation }) {
             return [...prev, pt];
           });
 
-          // follow camera while recording (kept from your original logic)
+          // follow camera
           const latDelta = region?.latitudeDelta ?? 0.01;
           const lonDelta = region?.longitudeDelta ?? 0.01;
           mapRef.current?.animateToRegion?.({
@@ -207,9 +189,7 @@ export default function AddTrail({ navigation }) {
   };
 
   const stopAndSave = async () => {
-    try {
-      watchRef.current?.remove?.();
-    } catch {}
+    try { watchRef.current?.remove?.(); } catch {}
     watchRef.current = null;
     setRecording(false);
 
@@ -252,21 +232,8 @@ export default function AddTrail({ navigation }) {
     }
   };
 
-  // Guards
   const canBegin = !!region && !!name.trim() && !recording;
   const canStop = recording && route.length > 0;
-
-  // NEW: standardized auto-fit across screens
-  useFitToGeometry({
-    mapRef,
-    route,
-    start: startCoords,
-    end: endCoords,
-    padding: { top: 60, right: 60, bottom: 60, left: 60 },
-    animated: true,
-    minSpan: 0.0005,
-    debounceMs: 0,
-  });
 
   if (!region) {
     return (
@@ -338,10 +305,7 @@ const styles = StyleSheet.create({
   center:     { flex: 1, justifyContent: 'center', alignItems: 'center' },
   dim:        { color: '#666', marginTop: 8 },
   form:       { paddingHorizontal: 12, paddingTop: 12 },
-  input: {
-    borderWidth: 1, borderColor: '#CCC', padding: 10,
-    borderRadius: 6, marginBottom: 8,
-  },
+  input: { borderWidth: 1, borderColor: '#CCC', padding: 10, borderRadius: 6, marginBottom: 8 },
   mapWrap:    { flex: 1, marginTop: 4 },
   footer:     { padding: 12, gap: 8 },
   hint:       { color: '#666', marginBottom: 4 },

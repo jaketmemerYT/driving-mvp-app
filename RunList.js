@@ -1,192 +1,186 @@
 // RunList.js
-import React, {
-  useState, useLayoutEffect, useContext, useCallback, useMemo, memo, useRef, useEffect,
-} from 'react';
+import React, { useState, useLayoutEffect, useCallback, memo } from 'react';
 import {
-  View, Text, FlatList, ScrollView, TouchableOpacity,
-  StyleSheet, Button, Platform,
+  View,
+  Text,
+  FlatList,
+  ScrollView,
+  TouchableOpacity,
+  ActivityIndicator,
+  StyleSheet,
+  Button,
+  Platform,
 } from 'react-native';
-import MapView, { PROVIDER_GOOGLE } from 'react-native-maps';
-import { Svg, Polyline as SvgPolyline, Circle as SvgCircle } from 'react-native-svg';
+import { Polyline } from 'react-native-maps';
 import axios from 'axios';
 import { useFocusEffect } from '@react-navigation/native';
-
 import { API_BASE } from './config';
-import { UserContext } from './UserContext';
+import { useRouteColors } from './useRouteColors';
+import { buildDeviationSegments } from './geoUtils';
+import MapThumbSnapshot from './MapThumbSnapshot';
 
-// --- shared helpers ---
-const M_PER_DEG_LAT = 111132;
-function metersPerDegLon(latDeg) {
-  const r = Math.cos((latDeg * Math.PI) / 180);
-  return M_PER_DEG_LAT * Math.max(0.000001, r);
+const MAX_RUN_PTS = 300;
+const MAX_OFFICIAL_PTS = 200;
+
+// helpers (no hooks)
+function sampleLine(line = [], maxPts) {
+  if (!Array.isArray(line) || line.length <= maxPts) return line || [];
+  const step = Math.ceil(line.length / maxPts);
+  const out = [];
+  for (let i = 0; i < line.length; i += step) out.push(line[i]);
+  const last = line[line.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
 }
-function fitRegionToBox(points, boxW, boxH, { padRatio = 0.06, minSpanM = 40 } = {}) {
-  if (!Array.isArray(points) || points.length === 0 || boxW <= 0 || boxH <= 0) {
-    return { latitude: 0, longitude: 0, latitudeDelta: 60, longitudeDelta: 60 };
+function regionFromCoords(points, padFrac = 0.12) {
+  const pts = (points || []).filter(
+    (p) => p && typeof p.latitude === 'number' && typeof p.longitude === 'number'
+  );
+  if (pts.length === 0) return null;
+  if (pts.length === 1) {
+    return {
+      latitude: pts[0].latitude,
+      longitude: pts[0].longitude,
+      latitudeDelta: 0.01,
+      longitudeDelta: 0.01,
+    };
   }
-  const lats = points.map(p => +p.latitude).filter(Number.isFinite);
-  const lons = points.map(p => +p.longitude).filter(Number.isFinite);
-  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
-  const minLon = Math.min(...lons), maxLon = Math.max(...lons);
-  const latC = (minLat + maxLat) / 2;
-  const mPerLon = metersPerDegLon(latC);
-
-  let heightM = Math.max((maxLat - minLat) * M_PER_DEG_LAT, minSpanM);
-  let widthM  = Math.max((maxLon - minLon) * mPerLon,        minSpanM);
-
-  heightM *= (1 + padRatio);
-  widthM  *= (1 + padRatio);
-
-  const boxAR = boxW / boxH;
-  const curAR = widthM / heightM;
-  if (curAR < boxAR) widthM = heightM * boxAR; else heightM = widthM / boxAR;
-
+  let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+  for (const p of pts) {
+    if (p.latitude < minLat) minLat = p.latitude;
+    if (p.latitude > maxLat) maxLat = p.latitude;
+    if (p.longitude < minLon) minLon = p.longitude;
+    if (p.longitude > maxLon) maxLon = p.longitude;
+  }
+  const latSpan = Math.max(0.0005, maxLat - minLat);
+  const lonSpan = Math.max(0.0005, maxLon - minLon);
+  const padLat = latSpan * padFrac;
+  const padLon = lonSpan * padFrac;
   return {
-    latitude: latC,
+    latitude: (minLat + maxLat) / 2,
     longitude: (minLon + maxLon) / 2,
-    latitudeDelta: heightM / M_PER_DEG_LAT,
-    longitudeDelta: widthM / mPerLon,
+    latitudeDelta: latSpan + padLat * 2,
+    longitudeDelta: lonSpan + padLon * 2,
   };
 }
-function mercY(latDeg) {
-  const rad = (latDeg * Math.PI) / 180;
-  return Math.log(Math.tan(Math.PI / 4 + rad / 2));
-}
-function projectLatLngToXY(lat, lon, region, width, height) {
-  const left = region.longitude - region.longitudeDelta / 2;
-  const right = region.longitude + region.longitudeDelta / 2;
-  const topLat = region.latitude + region.latitudeDelta / 2;
-  const botLat = region.latitude - region.latitudeDelta / 2;
-  const x = ((lon - left) / (right - left)) * width;
-  const topY = mercY(topLat);
-  const botY = mercY(botLat);
-  const y = ((topY - mercY(lat)) / (topY - botY)) * height;
-  return { x, y };
-}
 
-const ListMapPreview = memo(function ListMapPreview({ coords = [], stroke = '#1E90FF' }) {
-  const mapRef = useRef(null);
-  const [box, setBox] = useState({ w: 0, h: 0 });
-  const [region, setRegion] = useState(null);
-  const [pixRoute, setPixRoute] = useState(null);
-  const [pixStart, setPixStart] = useState(null);
-  const [mapReady, setMapReady] = useState(false);
+// memoized row
+const RunRow = memo(function RunRow({
+  item,
+  trailName,
+  official,
+  tCats,
+  categories,
+  colors,   // {liveColor, officialColor, warn1Color, warn2Color, warningThreshold1, warningThreshold2}
+  cacheKey, // signatureRunThumb
+  onPress,
+}) {
+  const coords = Array.isArray(item.coords) ? item.coords : [];
 
-  const isAndroid = Platform.OS === 'android';
-  const useNativeProjection = !isAndroid; // iOS only
+  const sampledRun = sampleLine(coords, MAX_RUN_PTS);
+  const sampledOfficial = sampleLine(official, MAX_OFFICIAL_PTS);
 
-  useEffect(() => {
-    if (box.w > 0 && box.h > 0) {
-      setRegion(fitRegionToBox(coords, box.w, box.h, { padRatio: 0.06, minSpanM: 40 }));
-    } else {
-      setRegion(null);
-    }
-    setPixRoute(null); setPixStart(null);
-  }, [box.w, box.h, coords]);
+  const fitCoords = (() => {
+    const combo = [];
+    sampledRun.forEach((p) => combo.push({ latitude: p.latitude, longitude: p.longitude }));
+    sampledOfficial.forEach((p) => combo.push({ latitude: p.latitude, longitude: p.longitude }));
+    return combo;
+  })();
 
-  useEffect(() => {
-    let cancelled = false;
-    async function project() {
-      if (!region || box.w <= 0 || box.h <= 0 || coords.length === 0) return;
+  const previewRegion =
+    regionFromCoords(fitCoords, 0.12) ||
+    (sampledRun[0]
+      ? { latitude: sampledRun[0].latitude, longitude: sampledRun[0].longitude, latitudeDelta: 0.02, longitudeDelta: 0.02 }
+      : { latitude: 37.7749, longitude: -122.4194, latitudeDelta: 0.2, longitudeDelta: 0.2 });
 
-      if (useNativeProjection) {
-        if (!mapRef.current || !mapReady) return;
-        try {
-          await new Promise(r => setTimeout(r, 60));
-          const rPix = await Promise.all(coords.map(async (p) => {
-            const { x, y } = await mapRef.current.pointForCoordinate({ latitude: p.latitude, longitude: p.longitude });
-            return `${x},${y}`;
-          }));
-          const sPix = await mapRef.current.pointForCoordinate({ latitude: coords[0].latitude, longitude: coords[0].longitude });
-          if (!cancelled) { setPixRoute(rPix); setPixStart(sPix); }
-        } catch {
-          const rPix = coords.map(p => {
-            const { x, y } = projectLatLngToXY(p.latitude, p.longitude, region, box.w, box.h);
-            return `${x},${y}`;
-          });
-          const sPix = projectLatLngToXY(coords[0].latitude, coords[0].longitude, region, box.w, box.h);
-          if (!cancelled) { setPixRoute(rPix); setPixStart(sPix); }
-        }
-      } else {
-        // Android safe path
-        const rPix = coords.map(p => {
-          const { x, y } = projectLatLngToXY(p.latitude, p.longitude, region, box.w, box.h);
-          return `${x},${y}`;
-        });
-        const sPix = projectLatLngToXY(coords[0].latitude, coords[0].longitude, region, box.w, box.h);
-        if (!cancelled) { setPixRoute(rPix); setPixStart(sPix); }
-      }
-    }
-    project();
-    return () => { cancelled = true; };
-  }, [useNativeProjection, mapReady, region, box.w, box.h, coords]);
+  const coloredSegments =
+    sampledRun.length > 0
+      ? buildDeviationSegments(sampledRun, sampledOfficial, {
+          liveRouteColor: colors.liveColor,
+          warningColor1: colors.warn1Color,
+          warningColor2: colors.warn2Color,
+          warningThreshold1: colors.warningThreshold1,
+          warningThreshold2: colors.warningThreshold2,
+        })
+      : [];
 
   return (
-    <View
-      style={styles.previewWrap}
-      onLayout={e => setBox({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}
-    >
-      {region && (
-        <MapView
-          ref={mapRef}
-          provider={PROVIDER_GOOGLE}
-          style={styles.previewMap}
-          initialRegion={region}
-          liteMode={Platform.OS === 'android'}
-          scrollEnabled={false}
-          zoomEnabled={false}
-          rotateEnabled={false}
-          pitchEnabled={false}
-          pointerEvents="none"
-          mapPadding={{ top: 1, left: 1, right: 1, bottom: 1 }}
-          renderToHardwareTextureAndroid
-          onMapReady={() => setMapReady(true)}
-        />
+    <TouchableOpacity style={styles.item} onPress={onPress} activeOpacity={0.85}>
+      <Text style={styles.title}>{trailName}</Text>
+
+      <View style={styles.badgesRow}>
+        {tCats.map((cid) => (
+          <View style={styles.badge} key={cid}>
+            <Text style={styles.badgeText}>{categories.find((c) => c.id === cid)?.name}</Text>
+          </View>
+        ))}
+      </View>
+
+      {coords.length > 0 && (
+        <View style={styles.previewWrap}>
+          <MapThumbSnapshot
+            region={previewRegion}
+            fitCoords={fitCoords}
+            style={styles.previewMap}
+            cacheKey={cacheKey} // depends on live/warn/critical colors + thresholds
+          >
+            {sampledOfficial.length > 1 && (
+              <Polyline
+                coordinates={sampledOfficial.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
+                strokeWidth={3}
+                strokeColor={colors.officialColor}
+              />
+            )}
+            {coloredSegments.length > 0 ? (
+              coloredSegments.map((seg, i) => (
+                <Polyline key={`seg-${i}-${seg.color}`} coordinates={seg.coordinates} strokeWidth={3} strokeColor={seg.color} />
+              ))
+            ) : sampledRun.length > 1 ? (
+              <Polyline
+                coordinates={sampledRun.map((p) => ({ latitude: p.latitude, longitude: p.longitude }))}
+                strokeWidth={3}
+                strokeColor={colors.liveColor}
+              />
+            ) : null}
+          </MapThumbSnapshot>
+        </View>
       )}
-      {box.w > 0 && box.h > 0 && pixRoute && (
-        <Svg width={box.w} height={box.h} style={StyleSheet.absoluteFillObject}>
-          {pixRoute.length > 1 && (
-            <SvgPolyline
-              points={pixRoute.join(' ')}
-              fill="none"
-              stroke={stroke}
-              strokeWidth={2}
-              strokeLinejoin="round"
-              strokeLinecap="round"
-            />
-          )}
-          {pixStart && <SvgCircle cx={pixStart.x} cy={pixStart.y} r={4} fill="#2E7D32" />}
-        </Svg>
-      )}
-    </View>
+
+      <Text style={styles.subtitle}>
+        {new Date(item.timestamp).toLocaleString()} • {Math.round(item.duration)}s
+      </Text>
+    </TouchableOpacity>
   );
 });
 
 export default function RunList({ navigation }) {
-  const { user, prefs } = useContext(UserContext);
+  const {
+    liveColor,
+    officialColor,
+    warn1Color,
+    warn2Color,
+    warningThreshold1,
+    warningThreshold2,
+    signatureRunThumb,
+  } = useRouteColors();
 
-  const [runs, setRuns] = useState([]);
+  const colors = {
+    liveColor,
+    officialColor,
+    warn1Color,
+    warn2Color,
+    warningThreshold1,
+    warningThreshold2,
+  };
+
+  const [runs, setRuns] = useState(null);
   const [trailsMap, setTrailsMap] = useState({});
+  const [trailRoutesMap, setTrailRoutesMap] = useState({});
+  const [trailCatsMap, setTrailCatsMap] = useState({});
   const [categories, setCategories] = useState([]);
   const [groups, setGroups] = useState([]);
   const [selectedGroup, setSelectedGroup] = useState(null);
-  const [trailCatsMap, setTrailCatsMap] = useState({});
   const [filterCatIds, setFilterCatIds] = useState([]);
-
-  const liveColor = prefs?.liveRouteColor || '#1E90FF';
-
-  const visibleRuns = useMemo(() => {
-    return runs.filter((r) => {
-      const tCats = trailCatsMap[r.trailId] || [];
-      const groupOk = selectedGroup?.categoryIds?.length
-        ? tCats.some((id) => selectedGroup.categoryIds.includes(id))
-        : true;
-      const manualOk = filterCatIds.length
-        ? tCats.some((id) => filterCatIds.includes(id))
-        : true;
-      return groupOk && manualOk;
-    });
-  }, [runs, trailCatsMap, selectedGroup, filterCatIds]);
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -198,29 +192,33 @@ export default function RunList({ navigation }) {
   useFocusEffect(
     useCallback(() => {
       let cancelled = false;
-      (async () => {
+      const loadAll = async () => {
         try {
           const [rRes, tRes, cRes, gRes] = await Promise.all([
-            axios.get(`${API_BASE}/api/routes`, { params: { userId: user?.id || '' } }),
+            axios.get(`${API_BASE}/api/routes`),
             axios.get(`${API_BASE}/api/trailheads`),
-            axios.get(`${API_BASE}/api/categories`).catch(() => ({ data: [] })),
-            axios.get(`${API_BASE}/api/groups`).catch(() => ({ data: [] })),
+            axios.get(`${API_BASE}/api/categories`),
+            axios.get(`${API_BASE}/api/groups`),
           ]);
           if (cancelled) return;
 
-          const sortedRuns = (rRes.data || []).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-          setRuns(sortedRuns);
+          setRuns(rRes.data.sort((a, b) => b.timestamp - a.timestamp));
 
-          const tMap = {};
-          (tRes.data || []).forEach((t) => (tMap[t.id] = t.name));
-          setTrailsMap(tMap);
+          const tNameMap = {};
+          const tRouteMap = {};
+          (tRes.data || []).forEach((t) => {
+            tNameMap[t.id] = t.name;
+            tRouteMap[t.id] = Array.isArray(t.route) ? t.route : [];
+          });
+          setTrailsMap(tNameMap);
+          setTrailRoutesMap(tRouteMap);
 
-          setCategories(cRes.data || []);
-          const grps = gRes.data || [];
-          setGroups(grps);
-          if (grps.length > 0) {
-            setSelectedGroup(grps[0]);
-            setFilterCatIds(grps[0].categoryIds || []);
+          setCategories(cRes.data);
+          setGroups(gRes.data);
+          if (gRes.data.length > 0) {
+            const grp = gRes.data[0];
+            setSelectedGroup(grp);
+            setFilterCatIds(grp.categoryIds || []);
           }
 
           const tcMap = {};
@@ -236,57 +234,68 @@ export default function RunList({ navigation }) {
           );
           if (!cancelled) setTrailCatsMap(tcMap);
         } catch (e) {
-          console.error('RunList load error', e?.message || e);
-          if (!cancelled) {
-            setRuns([]); setTrailsMap({}); setCategories([]); setGroups([]); setTrailCatsMap({});
-          }
+          console.error(e);
         }
-      })();
+      };
+      loadAll();
       return () => { cancelled = true; };
-    }, [user?.id])
+    }, [])
   );
+
+  if (!runs || !categories.length || !groups.length) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" />
+      </View>
+    );
+  }
+
+  const visibleRuns = runs.filter((r) => {
+    const tCats = trailCatsMap[r.trailId] || [];
+    if (!selectedGroup?.categoryIds?.length) {
+      return filterCatIds.length === 0 || tCats.some((id) => filterCatIds.includes(id));
+    }
+    const inGroup  = tCats.some((id) => selectedGroup.categoryIds.includes(id));
+    const inManual = filterCatIds.length === 0 || tCats.some((id) => filterCatIds.includes(id));
+    return inGroup && inManual;
+  });
 
   return (
     <View style={styles.container}>
-      {!!groups.length && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll} contentContainerStyle={styles.chipContainer}>
-          {groups.map((g) => {
-            const sel = selectedGroup?.id === g.id;
-            return (
-              <TouchableOpacity
-                key={g.id}
-                style={[styles.chip, sel && styles.chipSelected]}
-                onPress={() => {
-                  setSelectedGroup(g);
-                  setFilterCatIds(g.categoryIds || []);
-                }}
-              >
-                <Text style={[styles.chipText, sel && styles.chipTextSelected]}>{g.name}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
-      )}
+      {/* Group chips */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll} contentContainerStyle={styles.chipContainer}>
+        {groups.map((g) => {
+          const sel = selectedGroup?.id === g.id;
+          return (
+            <TouchableOpacity
+              key={g.id}
+              style={[styles.chip, sel && styles.chipSelected]}
+              onPress={() => {
+                setSelectedGroup(g);
+                setFilterCatIds(g.categoryIds || []);
+              }}
+            >
+              <Text style={[styles.chipText, sel && styles.chipTextSelected]}>{g.name}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
 
-      {!!categories.length && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll} contentContainerStyle={styles.chipContainer}>
-          {categories.map((cat) => {
-            const sel = filterCatIds.includes(cat.id);
-            return (
-              <TouchableOpacity
-                key={cat.id}
-                style={[styles.chip, sel && styles.chipSelected]}
-                onPress={() =>
-                  setFilterCatIds(sel ? filterCatIds.filter((x) => x !== cat.id) : [...filterCatIds, cat.id])
-                }
-              >
-                <Text style={[styles.chipText, sel && styles.chipTextSelected]}>{cat.name}</Text>
-              </TouchableOpacity>
-            );
-          })}
-          <Button title="Clear" onPress={() => setFilterCatIds([])} />
-        </ScrollView>
-      )}
+      {/* Category chips */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll} contentContainerStyle={styles.chipContainer}>
+        {categories.map((cat) => {
+          const sel = filterCatIds.includes(cat.id);
+          return (
+            <TouchableOpacity
+              key={cat.id}
+              style={[styles.chip, sel && styles.chipSelected]}
+              onPress={() => setFilterCatIds(sel ? filterCatIds.filter((x) => x !== cat.id) : [...filterCatIds, cat.id])}
+            >
+              <Text style={[styles.chipText, sel && styles.chipTextSelected]}>{cat.name}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
 
       {visibleRuns.length === 0 ? (
         <Text style={styles.empty}>No runs to show.</Text>
@@ -294,24 +303,25 @@ export default function RunList({ navigation }) {
         <FlatList
           data={visibleRuns}
           keyExtractor={(item) => item.id}
-          removeClippedSubviews={false}
-          initialNumToRender={10}
+          removeClippedSubviews={Platform.OS === 'android' ? false : undefined}
           windowSize={7}
+          initialNumToRender={6}
           renderItem={({ item }) => {
-            const coords = Array.isArray(item.coords) ? item.coords : [];
             const trailName = trailsMap[item.trailId] || 'Trail';
+            const official  = trailRoutesMap[item.trailId] || [];
+            const tCats     = trailCatsMap[item.trailId] || [];
 
             return (
-              <TouchableOpacity
-                style={styles.item}
+              <RunRow
+                item={item}
+                trailName={trailName}
+                official={official}
+                tCats={tCats}
+                categories={categories}
+                colors={colors}
+                cacheKey={`run:${item.id}:${signatureRunThumb}`} // <— only run-related prefs
                 onPress={() => navigation.navigate('RunDetail', { run: item, trailName })}
-              >
-                <Text style={styles.title}>{trailName}</Text>
-                <ListMapPreview coords={coords} stroke={liveColor} />
-                <Text style={styles.subtitle}>
-                  {new Date(item.timestamp || coords[0]?.timestamp || Date.now()).toLocaleString()} • {Math.round(item.duration || 0)}s
-                </Text>
-              </TouchableOpacity>
+              />
             );
           }}
         />
@@ -322,22 +332,33 @@ export default function RunList({ navigation }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   chipScroll: { maxHeight: 40, marginVertical: 4 },
   chipContainer: { paddingHorizontal: 8 },
-  chip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, backgroundColor: '#EEE', marginHorizontal: 4 },
+  chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#EEE',
+    marginHorizontal: 4,
+  },
   chipSelected: { backgroundColor: '#007AFF' },
   chipText: { color: '#333' },
   chipTextSelected: { color: '#FFF' },
-
   item: { padding: 16, borderBottomWidth: 1, borderColor: '#EEE' },
   title: { fontSize: 16, fontWeight: 'bold' },
-
-  // Rounded ONLY on wrapper
-  previewWrap: { height: 110, marginVertical: 8, borderRadius: 8, overflow: 'hidden' },
-  previewMap: { ...StyleSheet.absoluteFillObject },
-
+  badgesRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 4 },
+  badge: {
+    backgroundColor: '#CCC',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginRight: 4,
+    marginBottom: 4,
+  },
+  badgeText: { fontSize: 12, color: '#333' },
+  previewWrap: { height: 110, marginVertical: 8 },
+  previewMap: { flex: 1, borderRadius: 8, overflow: 'hidden' },
   subtitle: { color: '#666' },
-
-  empty: { textAlign: 'center', marginTop: 24, color: '#666' },
+  empty: { textAlign: 'center', marginTop: 32, color: '#666' },
 });

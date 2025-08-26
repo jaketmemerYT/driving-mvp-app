@@ -8,20 +8,23 @@ import {
   StyleSheet,
   TouchableOpacity,
   Button,
+  Platform,
 } from 'react-native';
 import { Polyline, Marker, Circle } from 'react-native-maps';
 import * as Location from 'expo-location';
+import * as Haptics from 'expo-haptics';
 import axios from 'axios';
 
-import MapBase from './MapBase';            // <-- tiled base map
+import MapBase from './MapBase';
 import { API_BASE } from './config';
 import { UserContext } from './UserContext';
+import { useRouteColors } from './useRouteColors';
 
 // --- helpers ---
 const FT_TO_M = 0.3048;
 
 function haversineMeters(a, b) {
-  const toRad = d => (d * Math.PI) / 180;
+  const toRad = (d) => (d * Math.PI) / 180;
   const R = 6371000;
   const dLat = toRad(b.latitude - a.latitude);
   const dLon = toRad(b.longitude - a.longitude);
@@ -33,7 +36,7 @@ function haversineMeters(a, b) {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
-// nearest distance to any point in an official polyline (fast, good enough for MVP)
+// nearest distance to any point in an official polyline (fast MVP)
 function minDistanceToPolylineMeters(pt, polyline) {
   if (!Array.isArray(polyline) || polyline.length === 0) return Infinity;
   let min = Infinity;
@@ -45,12 +48,21 @@ function minDistanceToPolylineMeters(pt, polyline) {
 }
 
 export default function Tracker({ route, navigation }) {
-  const { user, prefs } = useContext(UserContext);
+  const { user } = useContext(UserContext);
+  const {
+    liveColor,
+    officialColor,
+    warn1Color,
+    warn2Color,
+    warningThreshold1,
+    warningThreshold2,
+  } = useRouteColors();
+
   const {
     trailId,
     trailName,
-    startCoords: startFromDetail,      // optional
-    endCoords: endFromDetail,          // optional
+    startCoords: startFromDetail, // optional
+    endCoords: endFromDetail,     // optional
   } = route.params;
 
   const [trail, setTrail] = useState(null); // fetch ensures we have official route
@@ -69,9 +81,13 @@ export default function Tracker({ route, navigation }) {
 
   const startTime = useRef(null);
   const watchRef = useRef(null);
-  const [strokeColor, setStrokeColor] = useState(
-    prefs?.routeColor || '#1E90FF' // live route color default
-  );
+
+  // live stroke color that can change with deviation
+  const [strokeColor, setStrokeColor] = useState(liveColor);
+
+  // track current deviation zone to avoid spamming haptics
+  // zone: 0=ok, 1=warn1, 2=warn2
+  const zoneRef = useRef(0);
 
   // --- load trail & vehicles on focus ---
   useEffect(() => {
@@ -79,22 +95,19 @@ export default function Tracker({ route, navigation }) {
 
     const load = async () => {
       try {
-        // fetch the single trail so we have official route + endCoords
         const t = await axios.get(`${API_BASE}/api/trailheads/${trailId}`);
         if (!active) return;
         setTrail(t.data);
 
-        // vehicles limited to current user, if any
         if (user?.id) {
           const v = await axios.get(`${API_BASE}/api/vehicles?userId=${user.id}`);
           if (!active) return;
           setVehicles(v.data);
           if (v.data.length === 1) setSelectedVehicleId(v.data[0].id);
         } else {
-          setVehicles([]); // no user selected
+          setVehicles([]);
         }
 
-        // if no region yet and we have start coords (from trail), seed map
         const start = startFromDetail || t.data.coords;
         if (!region && start && start.latitude != null) {
           setRegion({ ...start, latitudeDelta: 0.01, longitudeDelta: 0.01 });
@@ -129,7 +142,7 @@ export default function Tracker({ route, navigation }) {
 
   // --- start tracking ---
   const startTracking = async () => {
-    if (!user?.id) return Alert.alert('Profile', 'Select a profile first in Profile tab.');
+    if (!user?.id) return Alert.alert('Profile', 'Select a profile first in the Profile tab.');
     if (!selectedVehicleId) return Alert.alert('Vehicle', 'Pick a vehicle to continue.');
 
     const { status } = await Location.requestForegroundPermissionsAsync();
@@ -156,7 +169,8 @@ export default function Tracker({ route, navigation }) {
     setTracking(true);
 
     // reset to preferred live color on start
-    setStrokeColor(prefs?.routeColor || '#1E90FF');
+    setStrokeColor(liveColor);
+    zoneRef.current = 0;
 
     watchRef.current = await Location.watchPositionAsync(
       { accuracy: Location.Accuracy.High, distanceInterval: 1, timeInterval: 1000 },
@@ -176,15 +190,29 @@ export default function Tracker({ route, navigation }) {
         const official = trail?.route || [];
         if (official.length > 0) {
           const distM = minDistanceToPolylineMeters(pt, official);
-          const warn50 = (prefs?.warn50Feet ?? 50) * FT_TO_M;
-          const warn75 = (prefs?.warn75Feet ?? 75) * FT_TO_M;
-          if (distM > warn75) {
-            setStrokeColor(prefs?.warn75Color || '#FF0000');
-          } else if (distM > warn50) {
-            setStrokeColor(prefs?.warn50Color || '#FFA500');
-          } else {
-            setStrokeColor(prefs?.routeColor || '#1E90FF');
+          const warn1M = (warningThreshold1 || 50) * FT_TO_M;
+          const warn2M = (warningThreshold2 || 75) * FT_TO_M;
+
+          let nextZone = 0;
+          let nextColor = liveColor;
+          if (distM > warn2M) {
+            nextZone = 2;
+            nextColor = warn2Color;
+          } else if (distM > warn1M) {
+            nextZone = 1;
+            nextColor = warn1Color;
           }
+
+          // update color if changed
+          if (nextColor !== strokeColor) setStrokeColor(nextColor);
+
+          // haptics on upward zone transitions only (no await here)
+          if (nextZone > zoneRef.current) {
+            Haptics.impactAsync(
+              nextZone === 2 ? Haptics.ImpactFeedbackStyle.Heavy : Haptics.ImpactFeedbackStyle.Medium
+            ).catch(() => {});
+          }
+          zoneRef.current = nextZone;
         }
       }
     );
@@ -201,14 +229,10 @@ export default function Tracker({ route, navigation }) {
       return Alert.alert('No GPS', 'No GPS points recorded.');
     }
 
-    // duration
     const duration = (Date.now() - (startTime.current || Date.now())) / 1000;
-
-    // avg speed from points (m/s average of samples)
     const avgSpeed =
       runCoords.reduce((sum, c) => sum + (c.speed || 0), 0) / runCoords.length || 0;
 
-    // post run
     try {
       const payload = {
         trailId,
@@ -278,10 +302,14 @@ export default function Tracker({ route, navigation }) {
   const startMarker = coords[0];
   const lastMarker = coords[coords.length - 1];
   const official = trail?.route || [];
-  const officialColor = prefs?.officialRouteColor || '#000000';
 
   return (
-    <MapBase style={styles.map} initialRegion={region}>
+    <MapBase
+      style={styles.map}
+      initialRegion={region}
+      tilesEnabled={true}
+      cacheEnabled={Platform.OS === 'android'}
+    >
       {/* official route */}
       {official.length > 1 && (
         <Polyline coordinates={official} strokeWidth={4} strokeColor={officialColor} />
