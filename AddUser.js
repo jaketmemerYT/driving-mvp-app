@@ -1,69 +1,103 @@
 // AddUser.js
-import React, { useState, useContext } from 'react';
-import {
-  View,
-  TextInput,
-  Button,
-  Alert,
-  StyleSheet,
-} from 'react-native';
+import React, { useEffect, useState, useLayoutEffect, useContext } from 'react';
+import { View, Text, TextInput, Button, StyleSheet, Alert, ActivityIndicator } from 'react-native';
 import axios from 'axios';
-import { UserContext } from './UserContext';
 import { API_BASE } from './config';
+import { UserContext } from './UserContext';
 
-export default function AddUser() {
-  const { setUser } = useContext(UserContext);
+export default function AddUser({ route, navigation }) {
+  const editId = route?.params?.userId || null;
+  const isEdit = !!editId;
+
+  const { user, setUser } = useContext(UserContext) || {};
+
   const [name, setName]   = useState('');
   const [email, setEmail] = useState('');
+  const [loading, setLoading] = useState(isEdit);
 
-  const handleCreate = async () => {
-    if (!name.trim()) {
-      return Alert.alert('Error', 'Name is required.');
+  useLayoutEffect(() => {
+    navigation.setOptions({ title: isEdit ? 'Edit Profile' : 'New Profile' });
+  }, [navigation, isEdit]);
+
+  useEffect(() => {
+    let active = true;
+    if (!isEdit) return;
+    (async () => {
+      try {
+        const res = await axios.get(`${API_BASE}/api/users/${editId}`);
+        if (!active) return;
+        setName(res.data?.name || '');
+        setEmail(res.data?.email || '');
+      } catch (e) {
+        console.error(e);
+        Alert.alert('Error', 'Could not load user.');
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [isEdit, editId]);
+
+  const onSave = async () => {
+    const payload = { name: name.trim(), email: email.trim() || undefined };
+    if (!payload.name) {
+      Alert.alert('Name required', 'Please enter a name.');
+      return;
     }
     try {
-      const res = await axios.post(`${API_BASE}/api/users`, {
-        name:  name.trim(),
-        email: email.trim() || null,
-      });
-      setUser(res.data);
-      // No navigation here—context change will switch to MainTabs automatically
-    } catch (err) {
-      Alert.alert(
-        'Creation failed',
-        err.response?.data?.error || err.message
-      );
+      if (isEdit) {
+        const res = await axios.put(`${API_BASE}/api/users/${editId}`, payload);
+        // if we edited the active user, update context
+        if (user?.id === editId) setUser?.(res.data);
+        navigation.goBack();
+      } else {
+        const res = await axios.post(`${API_BASE}/api/users`, payload);
+        // commonly, activate newly created profile
+        setUser?.(res.data);
+        navigation.popToTop(); // go back to where UserList/Auth leads
+      }
+    } catch (e) {
+      console.error(e);
+      Alert.alert('Error', isEdit ? 'Could not save changes.' : 'Could not create profile.');
     }
   };
 
+  if (loading) {
+    return <View style={styles.center}><ActivityIndicator size="large" /></View>;
+  }
+
   return (
     <View style={styles.container}>
+      <Text style={styles.label}>Display Name</Text>
       <TextInput
         style={styles.input}
-        placeholder="Name"
         value={name}
         onChangeText={setName}
+        placeholder="e.g., Alex Rider"
         autoCapitalize="words"
       />
+
+      <Text style={styles.label}>Email (optional)</Text>
       <TextInput
         style={styles.input}
-        placeholder="Email (optional)"
         value={email}
         onChangeText={setEmail}
+        placeholder="alex@example.com"
         keyboardType="email-address"
         autoCapitalize="none"
       />
-      <Button title="Create Profile" onPress={handleCreate} />
+
+      <Button title={isEdit ? 'Save Changes' : 'Create Profile'} onPress={onSave} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex:1, padding:16, justifyContent:'center' },
+  container: { flex: 1, padding: 16, backgroundColor: '#fff' },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  label: { fontWeight: '600', marginTop: 16, marginBottom: 8 },
   input: {
-    borderWidth: 1,
-    borderColor: '#CCC',
-    borderRadius: 4,
-    padding: 12,
-    marginBottom: 16,
+    borderWidth: 1, borderColor: '#ddd', borderRadius: 8, padding: 10,
+    backgroundColor: '#fff',
   },
 });

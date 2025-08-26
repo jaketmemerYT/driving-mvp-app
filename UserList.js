@@ -1,93 +1,138 @@
 // UserList.js
-import React, { useEffect, useState, useContext } from 'react';
-import {
-  View,
-  FlatList,
-  Text,
-  TouchableOpacity,
-  ActivityIndicator,
-  Button,
-  StyleSheet,
-} from 'react-native';
+import React, { useEffect, useState, useLayoutEffect, useContext, useCallback } from 'react';
+import { View, Text, ActivityIndicator, StyleSheet, FlatList, TouchableOpacity, Alert } from 'react-native';
 import axios from 'axios';
-import { UserContext } from './UserContext';
 import { API_BASE } from './config';
+import { UserContext } from './UserContext';
 
 export default function UserList({ navigation }) {
-  const { setUser } = useContext(UserContext);
+  const { user, setUser } = useContext(UserContext) || {};
   const [users, setUsers] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const activeId = user?.id || null;
+
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      title: 'Select Profile',
+      headerRight: () => (
+        <Text style={styles.newBtn} onPress={() => navigation.navigate('AddUser')}>New</Text>
+      ),
+    });
+  }, [navigation]);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/api/users`);
+      setUsers(Array.isArray(res.data) ? res.data : []);
+    } catch (e) {
+      console.error(e);
+      setUsers([]);
+    }
+  }, []);
 
   useEffect(() => {
     let active = true;
-    axios
-      .get(`${API_BASE}/api/users`)
-      .then(res => {
-        if (!active) return;
-        setUsers(res.data);
-      })
-      .catch(console.error)
-      .finally(() => active && setLoading(false));
+    load().catch(()=>{});
     return () => { active = false; };
-  }, []);
+  }, [load]);
 
-  if (loading) {
+  const makeActive = async (u) => {
+    try {
+      setUser?.(u); // context drives app to MainTabs
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const editUser = (u) => {
+    navigation.navigate('AddUser', { userId: u.id });
+  };
+
+  const deleteUser = async (u) => {
+    if (u.id === activeId) {
+      Alert.alert('Cannot delete active profile', 'Switch to a different profile first.');
+      return;
+    }
+    Alert.alert('Delete Profile', `Delete "${u.name}"?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await axios.delete(`${API_BASE}/api/users/${u.id}`);
+            await load();
+          } catch (e) {
+            console.error(e);
+            Alert.alert('Error', 'Could not delete profile.');
+          }
+        },
+      },
+    ]);
+  };
+
+  if (!users) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large"/>
-      </View>
+      <View style={styles.center}><ActivityIndicator size="large" /></View>
     );
   }
 
   return (
     <View style={styles.container}>
-      {/* Guest option */}
-      <Button
-        title="Continue as Guest"
-        onPress={() =>
-          setUser({ id: 'guest', name: 'Guest', email: null })
-        }
-      />
-
-      {/* Existing profiles */}
       <FlatList
         data={users}
-        keyExtractor={u => u.id}
-        ListHeaderComponent={<Text style={styles.header}>Select Profile</Text>}
-        renderItem={({ item }) => (
-          <TouchableOpacity
-            style={styles.item}
-            onPress={() => setUser(item)}
-          >
-            <Text style={styles.itemText}>{item.name}</Text>
-            {item.email ? (
-              <Text style={styles.subText}>{item.email}</Text>
-            ) : null}
-          </TouchableOpacity>
-        )}
-      />
+        keyExtractor={(u) => u.id}
+        renderItem={({ item }) => {
+          const isActive = item.id === activeId;
+          const initials = (item.name || 'U')
+            .split(' ')
+            .map((s) => s[0]?.toUpperCase())
+            .slice(0, 2)
+            .join('');
 
-      {/* Create new profile */}
-      <View style={styles.footer}>
-        <Button
-          title="New Profile"
-          onPress={() => navigation.navigate('AddUser')}
-        />
-      </View>
+          return (
+            <TouchableOpacity
+              style={[styles.row, isActive && styles.rowActive]}
+              activeOpacity={0.85}
+              onPress={() => makeActive(item)}
+            >
+              <View style={[styles.avatar, isActive && styles.avatarActive]}>
+                <Text style={styles.avatarTxt}>{initials}</Text>
+              </View>
+              <View style={styles.main}>
+                <Text style={styles.name}>
+                  {item.name} {isActive ? <Text style={styles.activePill}> • Active</Text> : null}
+                </Text>
+                {item.email ? <Text style={styles.dim}>{item.email}</Text> : null}
+              </View>
+              <Text style={styles.action} onPress={() => editUser(item)}>Edit</Text>
+              <Text style={[styles.action, styles.destructive]} onPress={() => deleteUser(item)}>Delete</Text>
+            </TouchableOpacity>
+          );
+        }}
+      />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 16 },
-  center:    { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  header:    { fontSize: 20, fontWeight: 'bold', marginBottom: 12 },
-  item:      {
-    padding:        12,
-    borderBottomWidth: 1,
-    borderColor:    '#EEE',
+  newBtn: { color: '#007AFF', fontWeight: '600', padding: 8 },
+  container: { flex: 1, backgroundColor: '#fff' },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  row: {
+    flexDirection: 'row', alignItems: 'center',
+    padding: 12, borderBottomWidth: 1, borderColor: '#EEE',
   },
-  itemText:  { fontSize: 16 },
-  subText:   { color: '#666', marginTop: 4 },
-  footer:    { marginTop: 16 },
+  rowActive: { backgroundColor: '#F8FAFF' },
+  avatar: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: '#0F172A', alignItems: 'center', justifyContent: 'center',
+  },
+  avatarActive: { backgroundColor: '#1D4ED8' },
+  avatarTxt: { color: '#fff', fontWeight: '700' },
+  main: { flex: 1, marginHorizontal: 10 },
+  name: { fontWeight: '700', color: '#0F172A' },
+  activePill: { color: '#10B981', fontWeight: '700' },
+  dim: { color: '#64748B', marginTop: 2 },
+  action: { color: '#007AFF', fontWeight: '600', paddingHorizontal: 6, paddingVertical: 4 },
+  destructive: { color: '#DC2626' },
 });
